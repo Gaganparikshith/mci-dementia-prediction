@@ -1,0 +1,12 @@
+﻿.venv/
+__pycache__/
+*.pyc
+*.pth
+Data/
+Outputs/
+Final_Report_Outputs/
+*.zip
+*.nii
+*.nii.gz
+.idea/
+Reports/
