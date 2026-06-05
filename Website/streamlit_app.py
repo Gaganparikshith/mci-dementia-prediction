@@ -584,7 +584,7 @@ if st.session_state.mode=="doctor":
             with r2:
                 st.markdown(f'<div class="{risk["cls"]}">',unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:4rem'>{risk['emoji']}</div>",unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:1.7rem;font-weight:900;color:{risk[\"color\"]} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:1.7rem;font-weight:900;color:{risk['color']} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:1rem;color:#374151 !important;margin-top:12px;line-height:1.85'>{risk['plain']}</div>",unsafe_allow_html=True)
                 st.markdown('</div>',unsafe_allow_html=True)
                 if len(models)>1:
@@ -1213,7 +1213,7 @@ else:
         with rr2:
             st.markdown(f'<div class="{risk["cls"]}">',unsafe_allow_html=True)
             st.markdown(f"<div style='font-size:4.5rem'>{risk['emoji']}</div>",unsafe_allow_html=True)
-            st.markdown(f"<div style='font-size:1.8rem;font-weight:900;color:{risk[\"color\"]} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:1.8rem;font-weight:900;color:{risk['color']} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
             st.markdown(f"<div style='font-size:1rem;color:#374151 !important;margin-top:14px;line-height:1.9'>{risk['plain']}</div>",unsafe_allow_html=True)
             st.markdown('</div>',unsafe_allow_html=True)
 
