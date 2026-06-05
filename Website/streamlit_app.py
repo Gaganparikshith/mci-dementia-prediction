@@ -1,26 +1,9 @@
 """
-streamlit_app.py — Memory Health Assessment Tool
-Two modes: Doctor (score entry) | Patient (interactive tests)
-Run: streamlit run streamlit_app.py
-
-CHANGES v2:
------------
-CHANGE 1 — Comorbidity inputs added to Doctor Mode form
-           (Diabetes, Hypertension, Smoking, BMI — §Medical History card)
-
-CHANGE 2 — Three prediction threshold modes added to Doctor Mode
-           Screening (t=0.15) | Balanced (t=0.35) | Confirmatory (t=0.50)
-
-CHANGE 3 — Prediction now applies selected threshold — risk display
-           reflects the chosen clinical use case.
-
-CHANGE 4 — Landing page AUC updated to 0.805 [0.732–0.870] to match
-           new scale_pos_weight model output.
-
-CHANGE 5 — Comorbidity risk flags added to Doctor Mode results panel.
+streamlit_app.py v5 — Memory Health Assessment
+All 45 UI changes + patient results saved to backend CSV
+Run: streamlit run Website/streamlit_app.py
 """
-
-import os, warnings, json, random
+import os, warnings, json, random, csv
 import numpy as np
 import joblib, pickle
 import streamlit as st
@@ -28,1425 +11,1322 @@ import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from datetime import datetime
 import shap
 warnings.filterwarnings("ignore")
 
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-MODEL_XGB = os.path.join(BASE_DIR, "models", "best_xgb.pkl")
-MODEL_RF  = os.path.join(BASE_DIR, "models", "best_rf.pkl")
-MODEL_LR  = os.path.join(BASE_DIR, "models", "best_lr.pkl")
-MODEL_CNN = None   # CNN disabled for cloud deployment
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+MODEL_XGB    = os.path.join(BASE_DIR, "models", "best_xgb.pkl")
+MODEL_RF     = os.path.join(BASE_DIR, "models", "best_rf.pkl")
+MODEL_LR     = os.path.join(BASE_DIR, "models", "best_lr.pkl")
+RESULTS_FILE = os.path.join(BASE_DIR, "results", "patient_results.csv")
 
-st.set_page_config(page_title="Memory Assessment Tool",
+st.set_page_config(page_title="Memory Health Assessment",
                    page_icon="🧠", layout="wide",
                    initial_sidebar_state="collapsed")
 
 # ════════════════════════════════════════════════════════
-# CSS
+# CSS — full dark mode support + all visual improvements
 # ════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 
-*, html, body { font-family: 'Sora', sans-serif !important; }
-.stApp { background: #fafafa; }
+/* Force light mode on every element */
+:root { color-scheme: light only !important; }
+*, *::before, *::after { font-family: 'Inter', sans-serif !important; }
 
-.mode-doctor {
-    background: linear-gradient(135deg, #0f172a 60%, #1e3a5f);
-    border-radius: 24px; padding: 40px 36px; cursor: pointer;
-    border: 3px solid transparent; transition: all .25s;
-    color: white; text-align: center;
-    box-shadow: 0 8px 40px #0f172a22;
+/* Main backgrounds — works in both light AND dark browser modes */
+[data-testid="stApp"],
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+.main, section.main,
+[data-testid="stVerticalBlock"],
+[data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="block-container"] {
+    background-color: #f0f4ff !important;
+    color: #1a1a2e !important;
 }
-.mode-patient {
-    background: linear-gradient(135deg, #7c3aed 0%, #db2777 100%);
-    border-radius: 24px; padding: 40px 36px; cursor: pointer;
-    border: 3px solid transparent; transition: all .25s;
-    color: white; text-align: center;
-    box-shadow: 0 8px 40px #7c3aed22;
-}
-.mode-doctor:hover { transform:translateY(-6px); box-shadow:0 16px 50px #0f172a44; }
-.mode-patient:hover { transform:translateY(-6px); box-shadow:0 16px 50px #7c3aed44; }
+[data-testid="stSidebar"] { background: #fff !important; }
 
-.doc-card {
-    background: white; border-radius: 16px;
-    border: 1px solid #e2e8f0;
-    padding: 24px 28px; margin: 10px 0;
-    box-shadow: 0 2px 16px #0001;
-    border-left: 5px solid #1e3a5f;
+/* Force ALL text dark regardless of browser theme */
+p, span, label, div, h1, h2, h3, h4, h5, h6, li, a,
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] *,
+[data-testid="stText"],
+[class*="css"] { color: #1a1a2e !important; }
+
+/* Inputs — always white background with dark text */
+input, textarea, select,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stTextArea"] textarea {
+    background-color: #ffffff !important;
+    color: #1a1a2e !important;
+    border: 2px solid #c7d2fe !important;
+    border-radius: 14px !important;
+    font-size: 1rem !important;
+    caret-color: #6366f1 !important;
 }
-/* CHANGE 1: Medical history card — orange left border */
-.doc-card-med {
-    background: #fff8f0; border-radius: 16px;
-    border: 1px solid #fed7aa;
-    padding: 24px 28px; margin: 10px 0;
-    box-shadow: 0 2px 16px #0001;
-    border-left: 5px solid #f97316;
-}
-/* CHANGE 2: Threshold mode selector card */
-.threshold-card {
-    background: #f0f9ff; border-radius: 16px;
-    border: 1px solid #bae6fd;
-    padding: 18px 24px; margin: 12px 0;
-    border-left: 5px solid #0284c7;
-}
-/* CHANGE 5: Comorbidity risk flag */
-.comorbidity-flag {
-    background: #fff7ed; border-radius: 12px;
-    border-left: 4px solid #f97316;
-    padding: 12px 18px; margin: 6px 0;
-    font-size: 0.87rem;
+input:focus, textarea:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 4px #6366f122 !important;
+    outline: none !important;
 }
 
-.pat-card {
-    background: white; border-radius: 20px;
-    border: 1px solid #ede9fe;
-    padding: 28px 32px; margin: 12px 0;
-    box-shadow: 0 4px 24px #7c3aed0f;
+/* Selectbox */
+[data-testid="stSelectbox"] > div > div {
+    background: #fff !important; color: #1a1a2e !important;
+    border: 2px solid #c7d2fe !important; border-radius: 12px !important;
 }
-.pat-step-badge {
-    display:inline-flex; align-items:center; justify-content:center;
-    width:44px; height:44px; border-radius:50%;
-    background: linear-gradient(135deg,#7c3aed,#db2777);
-    color:white; font-weight:800; font-size:1.1rem;
-    box-shadow: 0 4px 12px #7c3aed33; margin-right:12px;
-}
-.word-box {
-    display:inline-block; background:#f5f3ff;
-    border:2px solid #7c3aed; border-radius:12px;
-    padding:10px 18px; margin:6px;
-    font-size:1.15rem; font-weight:700; color:#4c1d95;
-    font-family:'IBM Plex Mono', monospace;
-}
-.progress-track { background:#ede9fe; border-radius:999px; height:8px; margin:8px 0; }
-.progress-fill {
-    background:linear-gradient(90deg,#7c3aed,#db2777);
-    border-radius:999px; height:8px; transition:width .4s ease;
-}
-.result-high   { background:linear-gradient(135deg,#fff1f2,#fef2f2); border:2px solid #fca5a5; border-radius:20px; padding:32px; text-align:center; }
-.result-medium { background:linear-gradient(135deg,#fffbeb,#fefce8); border:2px solid #fcd34d; border-radius:20px; padding:32px; text-align:center; }
-.result-low    { background:linear-gradient(135deg,#f0fdf4,#ecfdf5); border:2px solid #6ee7b7; border-radius:20px; padding:32px; text-align:center; }
-.prev-urgent { background:white; border-left:5px solid #ef4444; border-radius:14px; padding:18px 22px; margin:8px 0; box-shadow:0 2px 12px #ef44440f; }
-.prev-warn   { background:white; border-left:5px solid #f59e0b; border-radius:14px; padding:18px 22px; margin:8px 0; box-shadow:0 2px 12px #f59e0b0f; }
-.prev-good   { background:white; border-left:5px solid #10b981; border-radius:14px; padding:18px 22px; margin:8px 0; box-shadow:0 2px 12px #10b9810f; }
+[data-testid="stSelectbox"] svg { fill: #6366f1 !important; }
 
-.stButton>button {
-    font-family:'Sora',sans-serif !important; font-weight:700;
-    border-radius:14px; padding:12px 28px; width:100%;
-    border:none; font-size:1rem; transition:all .2s;
+/* Slider */
+[data-testid="stSlider"] > div { background: transparent !important; }
+[data-testid="stSlider"] div[data-baseweb="slider"] div {
+    background: linear-gradient(90deg, #6366f1, #8b5cf6) !important;
 }
-.stButton>button:hover { transform:translateY(-2px); }
-.digit-display {
-    font-family:'IBM Plex Mono',monospace;
-    font-size:3.5rem; font-weight:800; letter-spacing:16px;
-    text-align:center; color:#1e293b; padding:24px;
-    background:#f8fafc; border-radius:20px;
-    border:3px solid #e2e8f0; margin:16px 0;
+
+/* Radio buttons */
+[data-testid="stRadio"] label {
+    background: #fff !important; color: #1a1a2e !important;
+    border: 2px solid #c7d2fe !important; border-radius: 12px !important;
+    padding: 10px 20px !important; transition: all 0.15s !important;
 }
-.nav-pill-active {
-    background:linear-gradient(135deg,#7c3aed,#db2777);
-    color:white; border-radius:999px; padding:6px 18px;
-    font-weight:700; font-size:0.88rem; display:inline-block;
+[data-testid="stRadio"] label:hover { border-color: #6366f1 !important; background: #f5f3ff !important; }
+
+/* Progress bar */
+[data-testid="stProgress"] > div > div { background: linear-gradient(90deg,#6366f1,#8b5cf6,#ec4899) !important; }
+[data-testid="stProgress"] > div { background: #e0e7ff !important; }
+
+/* Metric */
+[data-testid="stMetric"] {
+    background: #fff !important; border-radius: 16px !important;
+    padding: 16px !important; border: 2px solid #e0e7ff !important;
 }
-.nav-pill {
-    background:#f1f5f9; color:#64748b;
-    border-radius:999px; padding:6px 18px;
-    font-weight:600; font-size:0.88rem; display:inline-block;
+[data-testid="stMetricValue"] { color: #6366f1 !important; }
+
+/* All buttons */
+.stButton > button,
+[data-testid="stFormSubmitButton"] > button {
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 800 !important; border-radius: 16px !important;
+    padding: 16px 32px !important; width: 100% !important;
+    border: none !important; font-size: 1.05rem !important;
+    transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1) !important;
+    background: linear-gradient(135deg,#6366f1,#8b5cf6) !important;
+    color: #ffffff !important; letter-spacing: 0.02em !important;
+    box-shadow: 0 4px 20px #6366f133 !important;
 }
-.header-bar {
-    background: linear-gradient(90deg,#0f172a,#1e3a5f);
-    border-radius: 20px; padding: 18px 28px;
-    display:flex; align-items:center; gap:16px; margin-bottom:24px;
+.stButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover {
+    transform: translateY(-4px) scale(1.02) !important;
+    box-shadow: 0 12px 32px #6366f155 !important;
+    background: linear-gradient(135deg,#4f46e5,#7c3aed) !important;
 }
-[data-testid="stNumberInput"] input {
-    font-family:'IBM Plex Mono',monospace; font-size:1rem;
-    background:#f8fafc; border:2px solid #e2e8f0; border-radius:10px;
+
+/* Hero mode cards */
+.hero-doctor {
+    background: linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);
+    border-radius: 28px; padding: 0; overflow: hidden;
+    box-shadow: 0 20px 60px #1a1a2e44;
+    transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    border: 2px solid rgba(255,255,255,0.08); cursor: pointer;
 }
-[data-testid="stNumberInput"] input:focus { border-color:#7c3aed; }
+.hero-doctor:hover { transform: translateY(-12px) scale(1.02); box-shadow: 0 40px 80px #1a1a2e55; border-color: rgba(99,102,241,0.5); }
+.hero-patient {
+    background: linear-gradient(135deg,#4c1d95 0%,#6d28d9 50%,#7c3aed 100%);
+    border-radius: 28px; padding: 0; overflow: hidden;
+    box-shadow: 0 20px 60px #7c3aed44;
+    transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    border: 2px solid rgba(255,255,255,0.12); cursor: pointer;
+}
+.hero-patient:hover { transform: translateY(-12px) scale(1.02); box-shadow: 0 40px 80px #7c3aed55; border-color: rgba(236,72,153,0.5); }
+.hero-inner { padding: 44px 36px 32px; text-align: center; }
+
+/* Big card button — covers the whole card */
+.hero-doctor .stButton > button {
+    background: rgba(99,102,241,0.25) !important;
+    border: 2px solid rgba(99,102,241,0.5) !important;
+    border-radius: 0 0 26px 26px !important;
+    margin: 0 !important; padding: 18px !important;
+    font-size: 1.1rem !important; font-weight: 900 !important;
+    color: #fff !important; box-shadow: none !important;
+    backdrop-filter: blur(8px);
+}
+.hero-patient .stButton > button {
+    background: rgba(236,72,153,0.25) !important;
+    border: 2px solid rgba(236,72,153,0.5) !important;
+    border-radius: 0 0 26px 26px !important;
+    margin: 0 !important; padding: 18px !important;
+    font-size: 1.1rem !important; font-weight: 900 !important;
+    color: #fff !important; box-shadow: none !important;
+}
+.hero-doctor .stButton > button:hover { background: rgba(99,102,241,0.45) !important; transform: none !important; }
+.hero-patient .stButton > button:hover { background: rgba(236,72,153,0.45) !important; transform: none !important; }
+
+/* Glass card */
+.gcard { background: rgba(255,255,255,0.96); backdrop-filter: blur(12px); border-radius: 22px; border: 2px solid #e0e7ff; padding: 30px 34px; margin: 12px 0; box-shadow: 0 4px 28px #6366f10a; }
+.gcard-orange { background: linear-gradient(135deg,#fff8f0,#fff); border-radius: 22px; border: 2px solid #fed7aa; padding: 28px 32px; margin: 12px 0; }
+
+/* Education cards */
+.edu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.edu-card { background: white; border-radius: 18px; border: 2px solid #e0e7ff; padding: 20px 18px; cursor: pointer; transition: all 0.2s; text-align: center; }
+.edu-card:hover { border-color: #6366f1; background: #f5f3ff; transform: scale(1.02); }
+.edu-card-sel { background: linear-gradient(135deg,#6366f1,#8b5cf6) !important; border-color: #6366f1 !important; color: white !important; transform: scale(1.02); box-shadow: 0 8px 24px #6366f133; }
+.edu-card-sel * { color: white !important; }
+
+/* Health cards */
+.hcard { background: white; border-radius: 18px; border: 2px solid #e0e7ff; padding: 20px 24px; margin: 8px 0; transition: all 0.2s; }
+.hcard:hover { border-color: #6366f1; box-shadow: 0 4px 16px #6366f115; }
+.hcard-warn { border-color: #fca5a5 !important; background: linear-gradient(135deg,#fff5f5,#fff) !important; }
+
+/* FAQ 2-column grid */
+.faq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 12px 0; }
+.faq-item { background: white; border-radius: 18px; border: 2px solid #e0e7ff; padding: 20px; box-shadow: 0 2px 12px #6366f108; }
+.faq-item:hover { border-color: #6366f1; }
+.faq-opt { background: white; border-radius: 12px; border: 2px solid #e0e7ff; padding: 10px 14px; margin: 5px 0; cursor: pointer; transition: all 0.15s; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; }
+.faq-opt:hover { border-color: #6366f1; background: #f5f3ff; }
+.faq-sel-0 { background: #f0fdf4 !important; border-color: #22c55e !important; font-weight: 700; }
+.faq-sel-1 { background: #fefce8 !important; border-color: #eab308 !important; font-weight: 700; }
+.faq-sel-2 { background: #fff7ed !important; border-color: #f97316 !important; font-weight: 700; }
+.faq-sel-3 { background: #fef2f2 !important; border-color: #ef4444 !important; font-weight: 700; }
+
+/* Mood 2-column grid */
+.mood-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 12px 0; }
+.mood-item { background: white; border-radius: 18px; border: 2px solid #e0e7ff; padding: 18px 20px; box-shadow: 0 2px 12px #6366f108; transition: all 0.2s; }
+.mood-item:hover { border-color: #6366f1; transform: translateY(-2px); }
+
+/* Word boxes */
+.wbox { display: inline-block; background: linear-gradient(135deg,#f5f3ff,#ede9fe); border: 2px solid #8b5cf6; border-radius: 14px; padding: 10px 18px; margin: 5px; font-size: 1.05rem; font-weight: 800; color: #4c1d95 !important; letter-spacing: 0.05em; transition: all 0.15s; }
+.wbox:hover { transform: scale(1.08); box-shadow: 0 4px 16px #8b5cf633; }
+
+/* Big action buttons */
+.big-btn { background: linear-gradient(135deg,#6366f1,#8b5cf6) !important; border: none !important; border-radius: 20px !important; padding: 20px 40px !important; font-size: 1.2rem !important; font-weight: 900 !important; color: white !important; box-shadow: 0 8px 32px #6366f144 !important; transition: all 0.25s !important; }
+.big-btn:hover { transform: translateY(-5px) !important; box-shadow: 0 16px 48px #6366f166 !important; }
+
+/* Progress */
+.prog-bg { background: #e0e7ff; border-radius: 999px; height: 12px; margin: 8px 0; overflow: hidden; }
+.prog-fill { border-radius: 999px; height: 12px; background: linear-gradient(90deg,#6366f1,#8b5cf6,#ec4899); transition: width 0.6s; }
+
+/* Nav pills */
+.npill { background: #e0e7ff; color: #3730a3 !important; border-radius: 999px; padding: 5px 14px; font-weight: 600; font-size: 0.79rem; display: inline-block; margin: 2px; }
+.npill-a { background: linear-gradient(135deg,#6366f1,#8b5cf6); color: white !important; border-radius: 999px; padding: 5px 14px; font-weight: 800; font-size: 0.79rem; display: inline-block; margin: 2px; }
+
+/* Result cards */
+.res-high { background: linear-gradient(135deg,#fff1f2,#fef2f2); border: 2px solid #fca5a5; border-radius: 28px; padding: 48px 32px; text-align: center; }
+.res-med  { background: linear-gradient(135deg,#fffbeb,#fefce8); border: 2px solid #fcd34d; border-radius: 28px; padding: 48px 32px; text-align: center; }
+.res-low  { background: linear-gradient(135deg,#f0fdf4,#ecfdf5); border: 2px solid #86efac; border-radius: 28px; padding: 48px 32px; text-align: center; }
+
+/* Metric cards */
+.mcard { background: white; border-radius: 18px; padding: 22px 16px; text-align: center; border: 2px solid #e0e7ff; box-shadow: 0 4px 16px #6366f108; }
+
+/* Prevention */
+.prev-u { background: white; border-left: 5px solid #ef4444; border-radius: 16px; padding: 16px 22px; margin: 8px 0; box-shadow: 0 2px 12px #ef44440a; }
+.prev-w { background: white; border-left: 5px solid #f59e0b; border-radius: 16px; padding: 16px 22px; margin: 8px 0; }
+.prev-g { background: white; border-left: 5px solid #10b981; border-radius: 16px; padding: 16px 22px; margin: 8px 0; }
+
+/* Digit display */
+.digit-display { font-family: 'Inter', monospace !important; font-size: 4rem; font-weight: 900; letter-spacing: 20px; text-align: center; color: #1a1a2e !important; padding: 32px; background: linear-gradient(135deg,#f0f4ff,#ede9fe); border-radius: 24px; border: 3px solid #c7d2fe; margin: 14px 0; }
+
+/* Remove Streamlit header decorations */
+#MainMenu, footer, header { visibility: hidden !important; }
+.block-container { padding-top: 1.5rem !important; max-width: 1200px !important; }
+[data-testid="stDecoration"] { display: none !important; }
+
+/* Disclaimer */
+.disclaimer { background: #fffbeb; border: 1px solid #fde68a; border-left: 4px solid #f59e0b; border-radius: 14px; padding: 10px 22px; display: inline-block; font-size: 0.86rem; color: #92400e !important; margin-top: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════
-# MODEL LOADING
-# ════════════════════════════════════════════════════════
+# ── Model loading ──────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_models():
     m = {}
-    for name, path in [("XGBoost", MODEL_XGB),
-                        ("Random Forest", MODEL_RF),
-                        ("Logistic Regression", MODEL_LR)]:
-        if not os.path.exists(path):
-            continue
-        try:
-            m[name] = joblib.load(path)
+    for name, path in [("XGBoost",MODEL_XGB),("Random Forest",MODEL_RF),("Logistic Regression",MODEL_LR)]:
+        if not os.path.exists(path): continue
+        try: m[name] = joblib.load(path)
         except:
             try:
-                with open(path, "rb") as f:
-                    m[name] = pickle.load(f)
-            except:
-                pass
+                with open(path,"rb") as f: m[name] = pickle.load(f)
+            except: pass
     return m
 
-@st.cache_resource(show_spinner=False)
-def load_cnn():
-    try:
-        import torch, torchvision.models as tvm, torch.nn as nn
-        mdl = tvm.resnet18(weights=None)
-        mdl.fc = nn.Linear(512, 2)
-        ckpt = torch.load(MODEL_CNN, map_location="cpu")
-        mdl.load_state_dict(ckpt["model_state_dict"])
-        mdl.eval()
-        return mdl
-    except:
-        return None
+models  = load_models()
+primary = models.get("XGBoost") or (list(models.values())[0] if models else None)
 
-models     = load_models()
-cnn_model  = load_cnn()
-primary    = models.get("XGBoost") or (list(models.values())[0] if models else None)
+ALL_FEATURES = ["PTGENDER","PTEDUCAT","MMSE_BL","MOCA_BL","ADAS11_BL","ADAS13_BL",
+                "FAQ_BL","GDS_BL","CDR_GLOBAL_BL","CDRSB_BL","RAVLT_forgetting",
+                "RAVLT_immediate","RAVLT_delayed","DigitSpan","TrailsB",
+                "MMSE_FAQ_composite","ADAS_MMSE_gap","RAVLT_forget_rate"]
 
-ALL_FEATURES = [
-    "PTGENDER", "PTEDUCAT", "MMSE_BL", "MOCA_BL", "ADAS11_BL",
-    "ADAS13_BL", "FAQ_BL", "GDS_BL", "CDR_GLOBAL_BL", "CDRSB_BL",
-    "RAVLT_forgetting", "RAVLT_immediate", "RAVLT_delayed", "DigitSpan",
-    "TrailsB", "MMSE_FAQ_composite", "ADAS_MMSE_gap", "RAVLT_forget_rate",
+WORD_LIST = ["drum","curtain","bell","coffee","school","parent","moon","garden",
+             "hat","farmer","nose","turkey","river","house","road"]
+
+# Education levels with year mapping
+EDU_OPTIONS = [
+    ("🏫", "No Formal\nEducation",   "0 years", 0),
+    ("📚", "Schooling\n(1st–10th)",  "10 years", 10),
+    ("🎒", "High School\n(11th–12th)","12 years", 12),
+    ("🎓", "UG / Bachelor's\n(4–5 yrs)","16 years", 16),
+    ("📖", "PG / Master's\n(2 yrs)",  "18 years", 18),
+    ("🔬", "Doctorate\n/ PhD",        "22+ years", 22),
 ]
 
-WORD_LIST = [
-    "drum", "curtain", "bell", "coffee", "school", "parent",
-    "moon", "garden", "hat", "farmer", "nose", "turkey", "river", "house", "road",
+FAQ_ITEMS = [
+    ("💳","Writing cheques or paying bills"),
+    ("🛒","Shopping alone for groceries"),
+    ("☕","Heating water, making coffee"),
+    ("🍽️","Preparing a balanced meal"),
+    ("📰","Keeping track of current news"),
+    ("📺","Following a TV series plot"),
+    ("📅","Remembering appointments"),
+    ("🚗","Driving or using transport"),
+    ("📝","Filling in forms / paperwork"),
+    ("💊","Managing medicines correctly"),
+]
+FAQ_OPTS = [
+    ("✅","No help needed", 0, "faq-sel-0"),
+    ("🤔","Sometimes needs help", 1, "faq-sel-1"),
+    ("😟","Often needs help", 2, "faq-sel-2"),
+    ("❌","Cannot do it at all", 3, "faq-sel-3"),
 ]
 
-DIGIT_SEQUENCES = [
-    [5,8,2], [6,9,4,1], [7,4,2,8,5], [3,9,1,7,4,2], [8,1,5,9,3,6,4],
-    [5,2,8,1,4,7,9,3], [9,3,7,1,5,4,8,2,6],
+GDS_ITEMS = [
+    ("😊","Basically satisfied with your life?","no"),
+    ("📉","Dropped many of your activities?","yes"),
+    ("😶","Life feels empty?","yes"),
+    ("😑","Often get bored?","yes"),
+    ("🌤️","In good spirits most of the time?","no"),
+    ("😰","Afraid something bad will happen?","yes"),
+    ("😄","Happy most of the time?","no"),
+    ("😔","Often feel helpless?","yes"),
+    ("🏠","Prefer staying home over going out?","yes"),
+    ("🧠","More memory problems than most?","yes"),
+    ("🌟","Wonderful to be alive now?","no"),
+    ("💔","Feel worthless the way you are?","yes"),
+    ("⚡","Full of energy?","no"),
+    ("🌑","Situation feels hopeless?","yes"),
+    ("📊","Others are better off than you?","yes"),
 ]
 
-FAQ_QUESTIONS = [
-    "Writing cheques or paying bills",
-    "Shopping alone",
-    "Heating water, making coffee or turning off appliances",
-    "Preparing a balanced meal",
-    "Keeping track of current events",
-    "Watching a TV series and following the plot",
-    "Remembering appointments or family occasions",
-    "Driving or using public transport",
-    "Filling in forms or doing paperwork",
-    "Managing medicines (correct dose at correct time)",
-]
-GDS_QUESTIONS = [
-    ("Are you basically satisfied with your life?",                "no"),
-    ("Have you dropped many of your activities?",                  "yes"),
-    ("Do you feel your life is empty?",                            "yes"),
-    ("Do you often get bored?",                                    "yes"),
-    ("Are you in good spirits most of the time?",                  "no"),
-    ("Are you afraid that something bad is going to happen?",      "yes"),
-    ("Do you feel happy most of the time?",                        "no"),
-    ("Do you often feel helpless?",                                "yes"),
-    ("Do you prefer to stay at home rather than go out?",          "yes"),
-    ("Do you feel you have more problems with memory than most?",  "yes"),
-    ("Do you think it is wonderful to be alive now?",              "no"),
-    ("Do you feel worthless the way you are now?",                 "yes"),
-    ("Do you feel full of energy?",                                "no"),
-    ("Do you feel your situation is hopeless?",                    "yes"),
-    ("Do you think that most people are better off than you?",     "yes"),
-]
-
-# ── CHANGE 2: Threshold map ───────────────────────────────────────────────────
 THRESHOLD_OPTIONS = {
-    "🔍 Screening  (t=0.15 — high sensitivity, catches most cases)":  0.15,
-    "⚖️ Balanced   (t=0.35 — recommended for general clinical use)":   0.35,
-    "✅ Confirmatory (t=0.50 — high specificity, fewer false alarms)": 0.50,
+    "🔍 Screening (t=0.15)": 0.15,
+    "⚖️ Balanced (t=0.35)":  0.35,
+    "✅ Confirmatory (t=0.50)": 0.50,
 }
 
 def compute_composites(v):
     v["MMSE_FAQ_composite"] = float(v["MMSE_BL"]) - float(v["FAQ_BL"])
-    v["ADAS_MMSE_gap"]      = float(v["ADAS13_BL"]) + (30 - float(v["MMSE_BL"]))
-    avg = max(float(v["RAVLT_immediate"]) / 5, 0.1)
-    v["RAVLT_forget_rate"]  = float(v["RAVLT_forgetting"]) / avg
+    v["ADAS_MMSE_gap"]      = float(v["ADAS13_BL"]) + (30-float(v["MMSE_BL"]))
+    avg = max(float(v["RAVLT_immediate"])/5, 0.1)
+    v["RAVLT_forget_rate"]  = float(v["RAVLT_forgetting"])/avg
     return v
 
 def risk_info(prob, threshold=0.50):
-    # CHANGE 3: threshold-aware risk tier boundaries
-    # Screening (0.15): boundaries 0.40 / 0.65
-    # Balanced  (0.35): boundaries 0.50 / 0.70
-    # Confirmatory (0.50): boundaries 0.55 / 0.75
-    if threshold <= 0.15:
-        lo, hi = 0.40, 0.65
-    elif threshold <= 0.35:
-        lo, hi = 0.50, 0.70
-    else:
-        lo, hi = 0.55, 0.75
+    if threshold<=0.15: lo,hi=0.40,0.65
+    elif threshold<=0.35: lo,hi=0.50,0.70
+    else: lo,hi=0.55,0.75
+    if prob>=hi: return {"level":"HIGH","color":"#ef4444","cls":"res-high","emoji":"⚠️","pct":int(prob*100),"headline":"Higher risk of progression","plain":"These scores suggest a higher-than-average chance of memory decline in the next 3 years. Please consult a neurologist soon."}
+    if prob>=lo: return {"level":"MODERATE","color":"#f59e0b","cls":"res-med","emoji":"🔶","pct":int(prob*100),"headline":"Moderate — monitor closely","plain":"Some warning signs present. Worth monitoring carefully with regular doctor visits."}
+    return {"level":"LOWER","color":"#10b981","cls":"res-low","emoji":"✅","pct":int(prob*100),"headline":"Lower risk at this time","plain":"Fewer signs of progression right now. Continue healthy habits and annual check-ups."}
 
-    if prob >= hi:
-        return {"level": "HIGH", "color": "#ef4444", "cls": "result-high",
-                "emoji": "⚠️", "pct": int(prob * 100),
-                "headline": "Higher risk of memory decline",
-                "plain": "The scores suggest a higher-than-average chance of "
-                         "memory getting worse in the next 3 years. "
-                         "Please consult a neurologist soon."}
-    if prob >= lo:
-        return {"level": "MODERATE", "color": "#f59e0b", "cls": "result-medium",
-                "emoji": "🔶", "pct": int(prob * 100),
-                "headline": "Moderate — keep a close watch",
-                "plain": "There are some warning signs. Not immediately alarming, "
-                         "but worth monitoring carefully with regular doctor visits."}
-    return {"level": "LOWER", "color": "#10b981", "cls": "result-low",
-            "emoji": "✅", "pct": int(prob * 100),
-            "headline": "Lower risk at this time",
-            "plain": "Fewer signs of progression right now. Continue healthy "
-                     "habits and annual check-ups."}
-
-PREVENTION = {
-    "HIGH": [
-        ("🏥 See a neurologist soon",
-         "Book an appointment this week. Early treatment makes the biggest difference.",
-         "prev-urgent"),
-        ("💊 Medication review",
-         "Some medicines affect memory. Ask your doctor to review all current medications.",
-         "prev-urgent"),
-        ("🥗 Mediterranean diet",
-         "Fish, olive oil, vegetables, nuts, whole grains. Reduce sugar and processed food.",
-         "prev-warn"),
-        ("🏃 Exercise 30 min daily",
-         "Walking, swimming or cycling improves blood flow to the brain.",
-         "prev-warn"),
-        ("😴 Fix sleep quality",
-         "7–8 hours every night. Treat snoring or insomnia with medical help.",
-         "prev-warn"),
-        ("🧩 Keep the mind active",
-         "Reading, puzzles, learning something new every day builds cognitive reserve.",
-         "prev-warn"),
-        ("❤️ Control BP, diabetes & cholesterol",
-         "These directly increase dementia risk — get them checked.",
-         "prev-warn"),
-        ("🚭 Reduce alcohol & quit smoking",
-         "Both damage brain cells significantly.",
-         "prev-good"),
-        ("👥 Stay socially connected",
-         "Regular contact with family and friends reduces isolation-related decline.",
-         "prev-good"),
-    ],
-    "MODERATE": [
-        ("📅 Book a memory check-up",
-         "Annual cognitive screening with a doctor is recommended.",
-         "prev-warn"),
-        ("🏃 Start exercising regularly",
-         "Even a 20-minute daily walk makes a measurable difference.",
-         "prev-warn"),
-        ("🥗 Improve diet quality",
-         "More fish, vegetables, and nuts. Less fried food and sugary drinks.",
-         "prev-good"),
-        ("🧩 Daily mental stimulation",
-         "Crosswords, reading, or learning a new hobby.",
-         "prev-good"),
-        ("😴 Better sleep habits",
-         "Consistent sleep and wake times. No screens 1 hour before bed.",
-         "prev-good"),
-        ("👥 Stay socially active",
-         "Loneliness is a significant risk factor for cognitive decline.",
-         "prev-good"),
-    ],
-    "LOWER": [
-        ("✅ Maintain healthy habits",
-         "Current scores are reassuring — keep up what you're doing.",
-         "prev-good"),
-        ("🏃 Stay physically active",
-         "Exercise remains the most powerful protection against cognitive decline.",
-         "prev-good"),
-        ("📅 Annual health check-ups",
-         "Blood pressure, blood sugar, and cholesterol check every year.",
-         "prev-good"),
-        ("🧩 Keep challenging your brain",
-         "New experiences and learning build long-term cognitive reserve.",
-         "prev-good"),
-    ],
-}
-
-# ── CHANGE 5: Comorbidity risk messages ──────────────────────────────────────
-def comorbidity_flags(diabetes, hypertension, smoking, bmi):
-    flags = []
-    if diabetes == "Yes":
-        flags.append("🩸 <b>Type 2 Diabetes</b> — insulin resistance is directly linked "
-                     "to amyloid accumulation. Tight glycaemic control is important.")
-    if hypertension == "Yes":
-        flags.append("💉 <b>Hypertension</b> — vascular damage accelerates cognitive "
-                     "decline. Ensure BP is regularly monitored and treated.")
-    if smoking == "Current":
-        flags.append("🚬 <b>Current smoker</b> — smoking is a significant cerebrovascular "
-                     "risk factor. Cessation support is strongly recommended.")
-    elif smoking == "Former":
-        flags.append("🚬 <b>Former smoker</b> — residual cerebrovascular risk present. "
-                     "Continue smoke-free lifestyle.")
-    if bmi >= 30:
-        flags.append(f"⚖️ <b>BMI {bmi:.1f} (Obese)</b> — midlife obesity significantly "
-                     "increases dementia risk. Weight management advised.")
-    elif bmi >= 25:
-        flags.append(f"⚖️ <b>BMI {bmi:.1f} (Overweight)</b> — some elevated risk. "
-                     "Healthy diet and exercise are recommended.")
+def comorbidity_flags(diabetes,hypertension,smoking,bmi):
+    flags=[]
+    if diabetes=="Yes": flags.append(("🩸","Type 2 Diabetes","Insulin resistance linked to amyloid accumulation. Tight glycaemic control is important.","#fef2f2","#ef4444"))
+    if hypertension=="Yes": flags.append(("💉","Hypertension","Vascular damage accelerates cognitive decline. Monitor BP regularly.","#fef2f2","#ef4444"))
+    if smoking=="Current": flags.append(("🚬","Current Smoker","Significant cerebrovascular risk factor. Cessation strongly recommended.","#fef2f2","#ef4444"))
+    elif smoking=="Former": flags.append(("🚬","Former Smoker","Residual cerebrovascular risk. Continue smoke-free.","#fffbeb","#f59e0b"))
+    if bmi>=30: flags.append(("⚖️",f"Obese (BMI {bmi:.1f})","Midlife obesity significantly increases dementia risk.","#fef2f2","#ef4444"))
+    elif bmi>=25: flags.append(("⚖️",f"Overweight (BMI {bmi:.1f})","Some elevated risk. Healthy diet recommended.","#fffbeb","#f59e0b"))
     return flags
 
-# ════════════════════════════════════════════════════════
-# SESSION STATE INITIALISATION
-# ════════════════════════════════════════════════════════
-if "mode" not in st.session_state:
-    st.session_state.mode = None
-if "patient_step" not in st.session_state:
-    st.session_state.patient_step = 0
-if "patient_data" not in st.session_state:
-    st.session_state.patient_data = {}
+PREVENTION = {
+    "HIGH":[("🏥","See a neurologist soon","Book this week. Early intervention makes the biggest difference.","prev-u"),
+            ("💊","Medication review","Ask your doctor to review all current medications.","prev-u"),
+            ("❤️","Control BP, diabetes & cholesterol","These directly increase dementia risk.","prev-w"),
+            ("🥗","Mediterranean diet","Fish, olive oil, vegetables, nuts, whole grains.","prev-w"),
+            ("🏃","Exercise 30 min daily","Walking or cycling improves brain blood flow.","prev-w"),
+            ("🧩","Keep mind active","Reading, puzzles, learning something new daily.","prev-g"),
+            ("🚭","Quit smoking","Significantly damages brain cells.","prev-g")],
+    "MODERATE":[("📅","Book a memory check-up","Annual cognitive screening recommended.","prev-w"),
+                ("🏃","Exercise regularly","Even 20-minute walks make a measurable difference.","prev-w"),
+                ("❤️","Check BP and blood sugar","Silent risk factors for brain health.","prev-w"),
+                ("🥗","Improve diet quality","More fish, vegetables, nuts.","prev-g"),
+                ("🧩","Daily mental stimulation","Crosswords, reading, or learning a hobby.","prev-g")],
+    "LOWER":[("✅","Maintain healthy habits","Current scores are reassuring — keep it up.","prev-g"),
+             ("🏃","Stay physically active","Exercise is the most powerful brain protection.","prev-g"),
+             ("📅","Annual health check-ups","BP, blood sugar, and cholesterol every year.","prev-g"),
+             ("🧩","Keep challenging your brain","New experiences build cognitive reserve.","prev-g")],
+}
+
+# ── Backend: save patient result ──────────────────────────────────────────────
+def save_patient_result(pd_, risk, prob, correct_imm, correct_del, ds_score, faq_score, gds_score):
+    try:
+        os.makedirs(os.path.dirname(RESULTS_FILE), exist_ok=True)
+        row = {
+            "timestamp":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "name":            pd_.get("name","Anonymous") or "Anonymous",
+            "sex":             pd_.get("sex",""),
+            "age":             pd_.get("age",""),
+            "education_level": pd_.get("edu_label",""),
+            "education_years": pd_.get("edu",12),
+            "diabetes":        pd_.get("diabetes","No"),
+            "hypertension":    pd_.get("hypertension","No"),
+            "smoking":         pd_.get("smoking","Never"),
+            "bmi":             round(float(pd_.get("bmi",25.0)),1),
+            "words_immediate": len(correct_imm),
+            "words_delayed":   len(correct_del),
+            "digit_span_score":int(ds_score),
+            "faq_score":       int(faq_score),
+            "gds_score":       int(gds_score),
+            "cdr_g":           round(float(pd_.get("cdr_g",0.5)),1),
+            "cdrsb":           round(float(pd_.get("cdrsb",1.5)),1),
+            "risk_level":      risk["level"],
+            "risk_pct":        risk["pct"],
+            "probability":     round(prob, 4),
+        }
+        file_exists = os.path.exists(RESULTS_FILE)
+        with open(RESULTS_FILE,"a",newline="",encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists: writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        pass  # Don't break the UI if file write fails
+
+# ── Session state ──────────────────────────────────────────────────────────────
+for k,v in [("mode",None),("patient_step",0),("patient_data",{}),
+            ("faq_answers",{}),("gds_answers",{})]:
+    if k not in st.session_state: st.session_state[k]=v
 
 # ════════════════════════════════════════════════════════
-# LANDING PAGE — MODE SELECTOR
+# LANDING PAGE
 # ════════════════════════════════════════════════════════
 if st.session_state.mode is None:
     st.markdown("""
-    <div style='text-align:center; padding:40px 0 20px'>
-        <div style='font-size:3.5rem'>🧠</div>
-        <h1 style='font-size:2.8rem; font-weight:800; color:#0f172a; margin:8px 0'>
-            Memory Health Assessment</h1>
-        <p style='color:#64748b; font-size:1.1rem; max-width:560px; margin:0 auto 8px'>
-            AI-powered tool to assess the risk of MCI progressing to dementia.</p>
-        <div style='background:#fffbeb;border:1px solid #fcd34d;border-left:4px solid #f59e0b;
-            border-radius:12px;padding:10px 20px;display:inline-block;
-            font-size:0.85rem;color:#92400e;margin-top:12px'>
-        ⚠️ Research prototype. Not for clinical diagnosis. Always consult a qualified doctor.
-        </div>
+    <div style='text-align:center;padding:48px 0 28px'>
+      <div style='display:inline-block;background:linear-gradient(135deg,#6366f1,#8b5cf6);
+          border-radius:28px;padding:20px 26px;font-size:3.8rem;margin-bottom:20px;
+          box-shadow:0 12px 40px #6366f155'>🧠</div>
+      <h1 style='font-size:3.4rem;font-weight:900;color:#1a1a2e;margin:0 0 14px;
+          background:linear-gradient(135deg,#4f46e5,#7c3aed);
+          -webkit-background-clip:text;-webkit-text-fill-color:transparent'>
+          Memory Health Assessment</h1>
+      <p style='color:#475569 !important;font-size:1.2rem;max-width:640px;
+          margin:0 auto 8px;line-height:1.85'>
+          <b style='color:#4f46e5 !important'>Early detection. Better outcomes.</b><br>
+          AI trained on 767 ADNI patients · Predicts MCI-to-dementia conversion risk<br>
+          with per-patient SHAP explanations and clinical-grade assessments.
+      </p>
+      <div class='disclaimer'>
+        ⚠️ Research prototype · Not a diagnostic tool · Always consult a qualified doctor
+      </div>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("### Choose your mode")
-    st.markdown("")
+    st.markdown("---")
+    c1, gap, c2 = st.columns([1,0.04,1])
 
-    c1, gap, c2 = st.columns([1, 0.08, 1])
     with c1:
-        st.markdown("""
-        <div class="mode-doctor">
-            <div style='font-size:3.5rem; margin-bottom:12px'>👨‍⚕️</div>
-            <h2 style='margin:0 0 8px; font-size:1.8rem'>Doctor / Clinician</h2>
-            <p style='opacity:0.8; margin:0; font-size:0.95rem; line-height:1.6'>
-            Enter clinical test scores directly.<br>
-            Immediate prediction with SHAP analysis<br>
-            and ensemble model comparison.
+        st.markdown("""<div class="hero-doctor">
+          <div class="hero-inner">
+            <div style='font-size:4rem;margin-bottom:16px'>👨‍⚕️</div>
+            <h2 style='color:white !important;margin:0 0 12px;font-size:2rem;font-weight:900'>Doctor / Clinician</h2>
+            <p style='color:rgba(255,255,255,0.88) !important;margin:0 0 20px;font-size:1rem;line-height:1.75'>
+              Enter clinical scores directly.<br>
+              SHAP explainability · Ensemble comparison<br>
+              3 threshold modes · Comorbidity flags
             </p>
-            <div style='margin-top:20px; background:rgba(255,255,255,0.15);
-                border-radius:10px; padding:8px 16px; font-size:0.83rem'>
-            ⚡ Fast • Precise • All 18 clinical features • 3 threshold modes
+            <div style='background:rgba(99,102,241,0.25);border:1px solid rgba(99,102,241,0.4);
+                border-radius:12px;padding:10px 18px;font-size:0.86rem;color:rgba(255,255,255,0.95) !important'>
+              ⚡ Fast · Precise · 18 features · Medical history
             </div>
+          </div>
         </div>""", unsafe_allow_html=True)
-        if st.button("Enter Doctor Mode →", key="btn_doc"):
-            st.session_state.mode = "doctor"
-            st.rerun()
+        if st.button("🩺  Enter Doctor Mode →", key="btn_doc"):
+            st.session_state.mode="doctor"; st.rerun()
 
     with c2:
-        st.markdown("""
-        <div class="mode-patient">
-            <div style='font-size:3.5rem; margin-bottom:12px'>🧑‍🤝‍🧑</div>
-            <h2 style='margin:0 0 8px; font-size:1.8rem'>Patient / Family</h2>
-            <p style='opacity:0.9; margin:0; font-size:0.95rem; line-height:1.6'>
-            Answer simple questions and do<br>
-            interactive memory tests — the app<br>
-            calculates scores automatically.
+        st.markdown("""<div class="hero-patient">
+          <div class="hero-inner">
+            <div style='font-size:4rem;margin-bottom:16px'>🧑‍🤝‍🧑</div>
+            <h2 style='color:white !important;margin:0 0 12px;font-size:2rem;font-weight:900'>Patient / Family</h2>
+            <p style='color:rgba(255,255,255,0.92) !important;margin:0 0 20px;font-size:1rem;line-height:1.75'>
+              Interactive memory tests, daily life questions,<br>
+              mood assessment and health history.<br>
+              Automatic scoring — no clinical knowledge needed.
             </p>
-            <div style='margin-top:20px; background:rgba(255,255,255,0.2);
-                border-radius:10px; padding:8px 16px; font-size:0.83rem'>
-            🎯 Interactive • Plain language • Voice memory test
+            <div style='background:rgba(236,72,153,0.25);border:1px solid rgba(236,72,153,0.4);
+                border-radius:12px;padding:10px 18px;font-size:0.86rem;color:rgba(255,255,255,0.95) !important'>
+              🎯 Interactive · Plain language · Voice-assisted · ~10 min
             </div>
+          </div>
         </div>""", unsafe_allow_html=True)
-        if st.button("Enter Patient Mode →", key="btn_pat"):
-            st.session_state.mode = "patient"
-            st.session_state.patient_step = 0
+        if st.button("🧩  Enter Patient Mode →", key="btn_pat"):
+            st.session_state.mode="patient"; st.session_state.patient_step=0
+            st.session_state.faq_answers={}; st.session_state.gds_answers={}
             st.rerun()
 
     st.markdown("---")
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        # CHANGE 4: updated AUC to 0.805 [0.732–0.870]
-        st.markdown("""<div style='text-align:center;padding:16px'>
-        <div style='font-size:2rem'>🤖</div>
-        <b>AI-powered</b><br>
-        <span style='font-size:0.85rem;color:#64748b'>
-        Trained on 767 ADNI patients<br>AUC-ROC: 0.805 [0.732–0.870]</span>
-        </div>""", unsafe_allow_html=True)
-    with col_b:
-        st.markdown("""<div style='text-align:center;padding:16px'>
-        <div style='font-size:2rem'>🔒</div>
-        <b>Private & local</b><br>
-        <span style='font-size:0.85rem;color:#64748b'>
-        All data stays on your computer.<br>Nothing is uploaded.</span>
-        </div>""", unsafe_allow_html=True)
-    with col_c:
-        st.markdown("""<div style='text-align:center;padding:16px'>
-        <div style='font-size:2rem'>🧩</div>
-        <b>Interactive tests</b><br>
-        <span style='font-size:0.85rem;color:#64748b'>
-        Memory, digit span, and<br>daily function assessments.</span>
-        </div>""", unsafe_allow_html=True)
-
+    ca,cb,cc,cd = st.columns(4)
+    for col,(em,title,sub) in zip([ca,cb,cc,cd],[
+        ("🤖","AI-Powered","XGBoost + CNN\nAUC 0.805 [0.732–0.870]"),
+        ("🔒","100% Private","Data stays on device.\nNothing uploaded."),
+        ("🔍","Explainable","SHAP per-patient.\nKnow exactly why."),
+        ("📱","Mobile-Friendly","Works on phone,\ntablet and laptop.")]):
+        col.markdown(f"""<div class='mcard'>
+        <div style='font-size:2.2rem;margin-bottom:8px'>{em}</div>
+        <div style='font-weight:800;font-size:1rem;color:#1a1a2e !important'>{title}</div>
+        <div style='font-size:0.82rem;color:#64748b !important;margin-top:4px;white-space:pre-line'>{sub}</div>
+        </div>""",unsafe_allow_html=True)
     st.stop()
 
-# ════════════════════════════════════════════════════════
-# HEADER (both modes)
-# ════════════════════════════════════════════════════════
-mode_label = "👨‍⚕️ Doctor Mode" if st.session_state.mode == "doctor" else "🧑‍🤝‍🧑 Patient Mode"
-mode_color = "#1e3a5f"  if st.session_state.mode == "doctor" else "#7c3aed"
-h1, h2 = st.columns([5, 1])
+# ── Header (NO Switch Mode button — removed) ───────────────────────────────────
+ml = "👨‍⚕️ Doctor Mode" if st.session_state.mode=="doctor" else "🧑‍🤝‍🧑 Patient Mode"
+mc = "linear-gradient(90deg,#1a1a2e,#4f46e5)" if st.session_state.mode=="doctor" else "linear-gradient(90deg,#4c1d95,#ec4899)"
+h1,h2 = st.columns([5,1])
 with h1:
-    st.markdown(f"""<div style='background:linear-gradient(90deg,{mode_color},
-        {"#2563eb" if st.session_state.mode=="doctor" else "#db2777"});
-        border-radius:16px;padding:14px 24px;color:white;margin-bottom:20px'>
-        <span style='font-size:1.1rem;font-weight:700'>🧠 Memory Assessment Tool</span>
-        <span style='margin-left:20px;opacity:0.8'>|  {mode_label}</span>
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div style='background:{mc};border-radius:18px;padding:14px 26px;
+    color:white;margin-bottom:20px;box-shadow:0 4px 20px rgba(0,0,0,0.15)'>
+    <span style='font-size:1.15rem;font-weight:800;color:white !important'>🧠 Memory Assessment</span>
+    <span style='margin-left:20px;opacity:0.8;font-size:0.95rem;color:white !important'>| {ml}</span>
+    </div>""",unsafe_allow_html=True)
 with h2:
-    if st.button("← Switch Mode"):
-        st.session_state.mode = None
-        st.session_state.patient_step = 0
-        st.session_state.patient_data = {}
-        for k in ["clin_prob", "mri_prob", "risk", "vals", "words_shown",
-                  "immediate_recall", "delayed_recall", "digit_score",
-                  "selected_threshold"]:   # CHANGE 2: clear threshold too
-            st.session_state.pop(k, None)
+    if st.button("🔄 Home"):
+        st.session_state.mode=None; st.session_state.patient_step=0
+        st.session_state.patient_data={}; st.session_state.faq_answers={}
+        st.session_state.gds_answers={}
+        for k in ["clin_prob","mri_prob","risk","vals","words_shown","word_phase",
+                  "digit_sequences","digit_level","digit_correct","digit_done",
+                  "digit_phase","selected_threshold","comorbidities"]:
+            st.session_state.pop(k,None)
         st.rerun()
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 # DOCTOR MODE
-# ════════════════════════════════════════════════════════════════════════════════
-if st.session_state.mode == "doctor":
-    tab1, tab2, tab3 = st.tabs(["📋 Assessment Form", "📊 Results & SHAP", "🧲 MRI Upload"])
+# ════════════════════════════════════════════════════════
+if st.session_state.mode=="doctor":
+    tab1,tab2,tab3 = st.tabs(["📋 Assessment Form","📊 Results & SHAP","📁 Patient Records"])
 
     with tab1:
-        st.markdown("#### Enter clinical test scores")
-        st.markdown('<div style="font-size:0.88rem;color:#64748b;margin-bottom:16px">'
-                    "Fill in scores from the patient's cognitive assessment report.</div>",
-                    unsafe_allow_html=True)
-        if not models:
-            st.error(f"No models found at `{DATA_ROOT}`")
-            st.stop()
-
+        st.markdown("### Enter clinical test scores")
+        if not models: st.error("No models found at Website/models/"); st.stop()
         with st.form("doctor_form"):
-            c1, c2, c3 = st.columns(3)
-
-            # ── Column 1: Demographics + Medical History ──────────────────────
+            c1,c2,c3 = st.columns(3)
             with c1:
-                st.markdown('<div class="doc-card"><b>👤 Demographics</b></div>',
-                            unsafe_allow_html=True)
-                sex   = st.selectbox("Sex", ["Male", "Female"])
-                edu   = st.number_input("Education (years)", 0, 25, 14, 1,
-                                         help="0 = no formal education")
-                cdr_g = st.selectbox("CDR Global", [0.0, 0.5, 1.0, 2.0, 3.0], index=1)
-                cdrsb = st.number_input("CDR Sum of Boxes", 0.0, 18.0, 1.5, 0.5)
-
-                # ── CHANGE 1: Medical History section ────────────────────────
-                st.markdown('<div class="doc-card-med"><b>🏥 Medical History</b></div>',
-                            unsafe_allow_html=True)
-                diabetes     = st.selectbox("Type 2 Diabetes",
-                                            ["No", "Yes"], index=0,
-                                            help="Insulin resistance linked to amyloid accumulation")
-                hypertension = st.selectbox("Hypertension",
-                                            ["No", "Yes"], index=0,
-                                            help="Vascular damage accelerates cognitive decline")
-                smoking      = st.selectbox("Smoking History",
-                                            ["Never", "Former", "Current"], index=0)
-                bmi          = st.number_input("BMI",
-                                               min_value=15.0, max_value=50.0,
-                                               value=25.0, step=0.1,
-                                               help="BMI ≥ 30 (obese) increases dementia risk")
-
-            # ── Column 2: Memory + Function ───────────────────────────────────
+                st.markdown('<div class="gcard"><b style="font-size:1rem;color:#1a1a2e">👤 Demographics</b></div>',unsafe_allow_html=True)
+                sex=st.selectbox("Sex",["Male","Female"])
+                edu=st.number_input("Education (years)",0,25,14,1)
+                cdr_g=st.selectbox("CDR Global",[0.0,0.5,1.0,2.0,3.0],index=1)
+                cdrsb=st.number_input("CDR Sum of Boxes",0.0,18.0,1.5,0.5)
+                st.markdown('<div class="gcard-orange"><b style="font-size:1rem;color:#1a1a2e">🏥 Medical History</b></div>',unsafe_allow_html=True)
+                diabetes=st.selectbox("Type 2 Diabetes",["No","Yes"])
+                hypertension=st.selectbox("Hypertension",["No","Yes"])
+                smoking=st.selectbox("Smoking History",["Never","Former","Current"])
+                bmi=st.number_input("BMI",15.0,50.0,25.0,0.1)
             with c2:
-                st.markdown('<div class="doc-card"><b>🧠 Memory (RAVLT)</b></div>',
-                            unsafe_allow_html=True)
-                rv_imm = st.number_input("RAVLT Immediate (0–75)", 0.0, 75.0, 35.0, 0.5)
-                rv_del = st.number_input("RAVLT Delayed (0–15)",   0.0, 15.0,  7.0, 0.5)
-                rv_fo  = st.number_input("RAVLT Forgetting (0–15)",0.0, 15.0,  4.0, 0.5)
-                ds     = st.number_input("Digit Span (0–28)",       0.0, 28.0, 14.0, 0.5)
-                st.markdown('<div class="doc-card"><b>🏠 Function</b></div>',
-                            unsafe_allow_html=True)
-                faq    = st.number_input("FAQ (0–30)", 0.0, 30.0,  5.0, 0.5)
-                gds    = st.number_input("GDS (0–15)", 0.0, 15.0,  2.0, 0.5)
-
-            # ── Column 3: Cognition ───────────────────────────────────────────
+                st.markdown('<div class="gcard"><b style="font-size:1rem;color:#1a1a2e">🧠 Memory (RAVLT)</b></div>',unsafe_allow_html=True)
+                rv_imm=st.number_input("RAVLT Immediate (0–75)",0.0,75.0,35.0,0.5)
+                rv_del=st.number_input("RAVLT Delayed (0–15)",0.0,15.0,7.0,0.5)
+                rv_fo=st.number_input("RAVLT Forgetting (0–15)",0.0,15.0,4.0,0.5)
+                ds=st.number_input("Digit Span (0–28)",0.0,28.0,14.0,0.5)
+                st.markdown('<div class="gcard"><b style="font-size:1rem;color:#1a1a2e">🏠 Function</b></div>',unsafe_allow_html=True)
+                faq=st.number_input("FAQ (0–30)",0.0,30.0,5.0,0.5)
+                gds=st.number_input("GDS (0–15)",0.0,15.0,2.0,0.5)
             with c3:
-                st.markdown('<div class="doc-card"><b>💭 Cognition</b></div>',
-                            unsafe_allow_html=True)
-                mmse   = st.number_input("MMSE (0–30)",          0.0, 30.0, 26.0, 0.5)
-                moca   = st.number_input("MoCA (0–30)",          0.0, 30.0, 23.0, 0.5)
-                adas13 = st.number_input("ADAS-Cog 13",          0.0, 85.0, 18.0, 0.5)
-                adas11 = st.number_input("ADAS-Cog 11",          0.0, 70.0, 13.0, 0.5)
-                trails = st.number_input("Trails B (seconds)",  10.0,300.0,120.0, 5.0)
-
-            # ── CHANGE 2: Threshold mode selector ────────────────────────────
-            st.markdown('<div class="threshold-card">', unsafe_allow_html=True)
-            st.markdown("**🎯 Prediction Mode** — choose clinical use case:")
-            threshold_mode = st.radio(
-                "Threshold",
-                list(THRESHOLD_OPTIONS.keys()),
-                index=1,                       # default: Balanced (t=0.35)
-                label_visibility="collapsed",
-                help="Screening catches more at-risk patients but flags more "
-                     "false positives. Confirmatory is stricter.",
-            )
-            st.markdown(
-                "<div style='font-size:0.82rem;color:#0369a1;margin-top:4px'>"
-                f"Selected threshold: <b>t = {THRESHOLD_OPTIONS[threshold_mode]:.2f}</b>  "
-                "— from xgb_threshold_tuning.csv"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown('</div>', unsafe_allow_html=True)
-
-            mri_w     = st.slider("Fusion weight (if MRI available)", 0.0, 0.5, 0.0, 0.05,
-                                   help="0 = clinical only. Set > 0 after uploading MRI in Tab 3.")
-            submitted = st.form_submit_button("🔍  Predict Now", use_container_width=True)
+                st.markdown('<div class="gcard"><b style="font-size:1rem;color:#1a1a2e">💭 Cognition</b></div>',unsafe_allow_html=True)
+                mmse=st.number_input("MMSE (0–30)",0.0,30.0,26.0,0.5)
+                moca=st.number_input("MoCA (0–30)",0.0,30.0,23.0,0.5)
+                adas13=st.number_input("ADAS-Cog 13",0.0,85.0,18.0,0.5)
+                adas11=st.number_input("ADAS-Cog 11",0.0,70.0,13.0,0.5)
+                trails=st.number_input("Trails B (seconds)",10.0,300.0,120.0,5.0)
+            st.markdown("""<div style='background:#f0f4ff;border-radius:16px;border:2px solid #c7d2fe;
+            padding:16px 22px;margin:10px 0'><b style='color:#4f46e5'>🎯 Prediction Mode</b></div>""",unsafe_allow_html=True)
+            tm=st.radio("Mode",list(THRESHOLD_OPTIONS.keys()),index=1,label_visibility="collapsed",horizontal=True)
+            t=THRESHOLD_OPTIONS[tm]
+            st.markdown(f"<div style='font-size:0.83rem;color:#4f46e5 !important;margin:4px 0'>Threshold: <b>t = {t:.2f}</b></div>",unsafe_allow_html=True)
+            mri_w=st.slider("MRI fusion weight (0 = clinical only)",0.0,0.5,0.0,0.05)
+            submitted=st.form_submit_button("🔍  Predict Now",use_container_width=True)
 
         if submitted:
-            # Build feature vector
-            vals = {
-                "PTGENDER":    0.0 if sex == "Male" else 1.0,
-                "PTEDUCAT":    float(edu),
-                "MMSE_BL":     mmse,
-                "MOCA_BL":     moca,
-                "ADAS11_BL":   adas11,
-                "ADAS13_BL":   adas13,
-                "FAQ_BL":      faq,
-                "GDS_BL":      gds,
-                "CDR_GLOBAL_BL": cdr_g,
-                "CDRSB_BL":    cdrsb,
-                "RAVLT_forgetting": rv_fo,
-                "RAVLT_immediate":  rv_imm,
-                "RAVLT_delayed":    rv_del,
-                "DigitSpan":   ds,
-                "TrailsB":     trails,
-            }
-            vals = compute_composites(vals)
-            st.session_state.vals = vals
+            vals={"PTGENDER":0.0 if sex=="Male" else 1.0,"PTEDUCAT":float(edu),
+                  "MMSE_BL":mmse,"MOCA_BL":moca,"ADAS11_BL":adas11,"ADAS13_BL":adas13,
+                  "FAQ_BL":faq,"GDS_BL":gds,"CDR_GLOBAL_BL":cdr_g,"CDRSB_BL":cdrsb,
+                  "RAVLT_forgetting":rv_fo,"RAVLT_immediate":rv_imm,"RAVLT_delayed":rv_del,
+                  "DigitSpan":ds,"TrailsB":trails}
+            vals=compute_composites(vals); st.session_state.vals=vals
+            X=np.array([[vals[f] for f in ALL_FEATURES]])
+            clin_prob=float(primary.predict_proba(X)[0,1])
+            mp=st.session_state.get("mri_prob",None)
+            fp=(1-mri_w)*clin_prob+mri_w*mp if (mp and mri_w>0) else clin_prob
+            st.session_state.clin_prob=clin_prob; st.session_state.selected_threshold=t
+            st.session_state.risk=risk_info(fp,t)
+            st.session_state.comorbidities={"diabetes":diabetes,"hypertension":hypertension,"smoking":smoking,"bmi":bmi}
+            st.success("✅ Done — open the **📊 Results & SHAP** tab")
 
-            X          = np.array([[vals[f] for f in ALL_FEATURES]])
-            clin_prob  = float(primary.predict_proba(X)[0, 1])
-            mri_prob   = st.session_state.get("mri_prob", None)
-
-            if mri_prob and mri_w > 0:
-                final_prob = (1 - mri_w) * clin_prob + mri_w * mri_prob
-            else:
-                final_prob = clin_prob
-
-            # CHANGE 2 & 3: store threshold and compute risk with it
-            threshold = THRESHOLD_OPTIONS[threshold_mode]
-            st.session_state.clin_prob          = clin_prob
-            st.session_state.selected_threshold = threshold
-            st.session_state.risk               = risk_info(final_prob, threshold)
-
-            # CHANGE 1: store comorbidity inputs for Results tab
-            st.session_state.comorbidities = {
-                "diabetes":     diabetes,
-                "hypertension": hypertension,
-                "smoking":      smoking,
-                "bmi":          bmi,
-            }
-
-            st.success("✅ Prediction complete — go to **📊 Results & SHAP** tab")
-
-    # ── Tab 2: Results & SHAP ─────────────────────────────────────────────────
     with tab2:
-        risk       = st.session_state.get("risk")
-        vals       = st.session_state.get("vals")
-        clin_prob  = st.session_state.get("clin_prob")
-        threshold  = st.session_state.get("selected_threshold", 0.35)  # CHANGE 2
-        comorbids  = st.session_state.get("comorbidities", {})          # CHANGE 1
-
+        risk=st.session_state.get("risk"); vals=st.session_state.get("vals")
+        t_used=st.session_state.get("selected_threshold",0.35)
+        com=st.session_state.get("comorbidities",{})
         if risk is None:
             st.info("Complete the assessment form first.")
         else:
-            r1, r2 = st.columns([1, 1])
+            r1,r2=st.columns([1,1])
             with r1:
-                fig = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=risk["pct"],
-                    title={"text": "Conversion Risk (%)", "font": {"size": 14, "color": "#374151"}},
-                    number={"suffix": "%", "font": {"size": 44, "color": risk["color"]}},
-                    gauge={
-                        "axis": {"range": [0, 100]},
-                        "bar":  {"color": risk["color"], "thickness": 0.28},
-                        "bgcolor": "#f8fafc",
-                        "steps": [
-                            {"range": [0,  35], "color": "#f0fdf4"},
-                            {"range": [35, 65], "color": "#fffbeb"},
-                            {"range": [65,100], "color": "#fef2f2"},
-                        ],
-                        "threshold": {"line": {"color": "#94a3b8", "width": 2}, "value": 50},
-                    },
-                ))
-                fig.update_layout(height=260, paper_bgcolor="white",
-                                  margin=dict(t=50, b=10, l=20, r=20))
-                st.plotly_chart(fig, use_container_width=True)
-
-                # CHANGE 2: show which threshold was used
-                st.markdown(
-                    f"<div style='text-align:center;font-size:0.82rem;color:#0369a1'>"
-                    f"Threshold used: <b>t = {threshold:.2f}</b></div>",
-                    unsafe_allow_html=True,
-                )
-
+                fig=go.Figure(go.Indicator(mode="gauge+number",value=risk["pct"],
+                    title={"text":"Conversion Risk","font":{"size":14,"color":"#1a1a2e"}},
+                    number={"suffix":"%","font":{"size":52,"color":risk["color"]}},
+                    gauge={"axis":{"range":[0,100]},"bar":{"color":risk["color"],"thickness":0.32},
+                           "bgcolor":"white","steps":[{"range":[0,35],"color":"#f0fdf4"},{"range":[35,65],"color":"#fffbeb"},{"range":[65,100],"color":"#fef2f2"}],
+                           "threshold":{"line":{"color":"#94a3b8","width":2},"value":50}}))
+                fig.update_layout(height=290,paper_bgcolor="white",margin=dict(t=60,b=10,l=20,r=20))
+                st.plotly_chart(fig,use_container_width=True)
+                st.markdown(f"<div style='text-align:center;font-size:0.85rem;color:#4f46e5 !important;font-weight:600'>Threshold: t = {t_used:.2f}</div>",unsafe_allow_html=True)
             with r2:
-                st.markdown(f"""<div class="{risk['cls']}">
-                <div style='font-size:3rem;margin-bottom:8px'>{risk['emoji']}</div>
-                <div style='font-size:1.4rem;font-weight:800;color:{risk["color"]}'>{risk['headline']}</div>
-                <div style='color:#374151;font-size:0.92rem;margin-top:10px;line-height:1.7'>{risk['plain']}</div>
-                </div>""", unsafe_allow_html=True)
-
-                if len(models) > 1:
+                st.markdown(f'<div class="{risk["cls"]}">',unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:4rem'>{risk['emoji']}</div>",unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:1.7rem;font-weight:900;color:{risk[\"color\"]} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:1rem;color:#374151 !important;margin-top:12px;line-height:1.85'>{risk['plain']}</div>",unsafe_allow_html=True)
+                st.markdown('</div>',unsafe_allow_html=True)
+                if len(models)>1:
                     st.markdown("**Ensemble comparison:**")
-                    for nm, mdl in models.items():
-                        X2 = np.array([[vals[f] for f in ALL_FEATURES]])
-                        mp = float(mdl.predict_proba(X2)[0, 1])
-                        st.metric(nm, f"{mp:.3f}",
-                                  delta="▲ pMCI" if mp >= threshold else "▼ sMCI")
-
-            # CHANGE 5: Comorbidity risk flags
-            if comorbids:
-                flags = comorbidity_flags(
-                    comorbids.get("diabetes", "No"),
-                    comorbids.get("hypertension", "No"),
-                    comorbids.get("smoking", "Never"),
-                    comorbids.get("bmi", 25.0),
-                )
+                    for nm,mdl in models.items():
+                        mp2=float(mdl.predict_proba(np.array([[vals[f] for f in ALL_FEATURES]]))[0,1])
+                        st.metric(nm,f"{mp2:.3f}","▲ pMCI" if mp2>=t_used else "▼ sMCI")
+            if com:
+                flags=comorbidity_flags(com.get("diabetes","No"),com.get("hypertension","No"),com.get("smoking","Never"),com.get("bmi",25.0))
                 if flags:
-                    st.markdown("#### 🏥 Comorbidity Risk Factors")
-                    st.markdown(
-                        "<div style='font-size:0.84rem;color:#64748b;margin-bottom:8px'>"
-                        "These factors are independent risk amplifiers not captured "
-                        "by the cognitive model alone.</div>",
-                        unsafe_allow_html=True,
-                    )
-                    for flag in flags:
-                        st.markdown(
-                            f'<div class="comorbidity-flag">{flag}</div>',
-                            unsafe_allow_html=True,
-                        )
-
-            # SHAP waterfall
+                    st.markdown("#### 🏥 Comorbidity Risk Amplifiers")
+                    for em,title,desc,bg,bc in flags:
+                        st.markdown(f"""<div style='background:{bg};border-radius:14px;border-left:5px solid {bc};padding:14px 20px;margin:6px 0'>
+                        <b style='color:#1a1a2e !important'>{em} {title}</b><br>
+                        <span style='font-size:0.87rem;color:#374151 !important'>{desc}</span></div>""",unsafe_allow_html=True)
             if vals and primary:
-                st.markdown("#### SHAP Feature Importance")
+                st.markdown("#### SHAP Feature Impact")
                 try:
-                    X = np.array([[vals[f] for f in ALL_FEATURES]])
-                    if hasattr(primary, "steps"):
-                        from sklearn.pipeline import Pipeline as SKPipeline
-                        xgb_model2 = primary.steps[-1][1]
-                        if len(primary.steps) > 1:
-                            pre2 = SKPipeline(primary.steps[:-1])
-                            try:    X_s2 = pre2.transform(X)
-                            except: X_s2 = X
-                        else:
-                            X_s2 = X
-                    else:
-                        xgb_model2 = primary
-                        X_s2       = X
+                    X=np.array([[vals[f] for f in ALL_FEATURES]])
+                    xm=primary.steps[-1][1] if hasattr(primary,"steps") else primary
+                    if hasattr(primary,"steps"):
+                        from sklearn.pipeline import Pipeline as SKP
+                        try: Xs=SKP(primary.steps[:-1]).transform(X)
+                        except: Xs=X
+                    else: Xs=X
+                    sv=shap.TreeExplainer(xm).shap_values(Xs)[0]
+                    idx=np.argsort(np.abs(sv))[-12:][::-1]
+                    nm_=[f.replace("_BL","").replace("_"," ") for f in ALL_FEATURES]
+                    fig2,ax=plt.subplots(figsize=(7,4.5)); fig2.patch.set_facecolor("white"); ax.set_facecolor("#f8fafc")
+                    ax.barh([nm_[i] for i in idx][::-1],sv[idx][::-1],
+                            color=["#ef4444" if v>0 else "#3b82f6" for v in sv[idx][::-1]],alpha=0.85,height=0.6)
+                    ax.axvline(0,color="#cbd5e1",lw=1.5)
+                    ax.set_xlabel("← Lower risk   |   Higher risk →",fontsize=9,color="#374151")
+                    ax.tick_params(colors="#374151",labelsize=8.5)
+                    for sp in ax.spines.values(): sp.set_edgecolor("#e2e8f0")
+                    plt.tight_layout(); st.pyplot(fig2,use_container_width=True); plt.close(fig2)
+                except Exception as e: st.info(f"SHAP: {e}")
 
-                    exp = shap.TreeExplainer(xgb_model2)
-                    sv  = exp.shap_values(X_s2)[0]
-                    idx = np.argsort(np.abs(sv))[-12:][::-1]
-                    nm_ = [f.replace("_BL", "").replace("_", " ") for f in ALL_FEATURES]
-                    top_nm = [nm_[i] for i in idx]
-                    top_sv = sv[idx]
-
-                    fig2, ax = plt.subplots(figsize=(7, 4))
-                    fig2.patch.set_facecolor("white")
-                    ax.set_facecolor("#f8fafc")
-                    ax.barh(top_nm[::-1], top_sv[::-1],
-                            color=["#ef4444" if v > 0 else "#3b82f6" for v in top_sv[::-1]],
-                            alpha=0.85, height=0.65)
-                    ax.axvline(0, color="#cbd5e1", lw=1.5)
-                    ax.set_xlabel("← Lower risk   |   Higher risk →",
-                                  fontsize=9, color="#374151")
-                    ax.tick_params(colors="#374151", labelsize=8.5)
-                    for sp in ax.spines.values():
-                        sp.set_edgecolor("#e2e8f0")
-                    plt.tight_layout()
-                    st.pyplot(fig2, use_container_width=True)
-                    plt.close(fig2)
-                except Exception as e:
-                    st.info(f"SHAP: {e}")
-
-    # ── Tab 3: MRI Upload ─────────────────────────────────────────────────────
     with tab3:
-        st.markdown("#### Upload Brain MRI (NIfTI)")
-        cnn_status = "✅ CNN model loaded" if cnn_model else "⚠️ CNN model not found"
-        st.caption(cnn_status)
-        uploaded = st.file_uploader("Upload .nii or .nii.gz", type=["nii", "gz"])
-        if uploaded:
-            with st.spinner("Processing MRI…"):
-                try:
-                    import nibabel as nib, torch
-                    from PIL import Image
-                    import torchvision.transforms as T
+        st.markdown("### 📁 Patient Assessment Records")
+        if os.path.exists(RESULTS_FILE):
+            import pandas as pd
+            df_results = pd.read_csv(RESULTS_FILE)
+            st.markdown(f"**{len(df_results)} assessments recorded**")
+            st.dataframe(df_results, use_container_width=True)
+            csv_data = df_results.to_csv(index=False)
+            st.download_button("⬇️ Download all records (CSV)",
+                               data=csv_data, file_name="patient_results.csv",
+                               mime="text/csv", use_container_width=True)
+        else:
+            st.info("No patient assessments recorded yet. Results will appear here after patients complete the assessment.")
 
-                    tmp = os.path.join(os.environ.get("TEMP", "C:\\Temp"), uploaded.name)
-                    with open(tmp, "wb") as f:
-                        f.write(uploaded.read())
-                    d = np.array(nib.load(tmp).get_fdata(), dtype=np.float32)
-                    if d.ndim == 4:
-                        d = d[..., 0]
-                    nz = d.shape[2]; mid = int(nz * .5)
-                    sls, prev = [], None
-                    for off in [-1, 0, 1]:
-                        sl = d[:, :, np.clip(mid + off, 0, nz - 1)]
-                        lo, hi = np.percentile(sl, [1, 99])
-                        sl = np.clip((sl - lo) / (hi - lo + 1e-8), 0, 1)
-                        u8 = (sl * 255).astype(np.uint8)
-                        if off == 0: prev = u8
-                        sls.append(u8)
-                    if cnn_model:
-                        from PIL import Image
-                        rgb = np.stack(sls, 2); pil = Image.fromarray(rgb, "RGB")
-                        t = T.Compose([T.Resize((224, 224)), T.ToTensor(),
-                                       T.Normalize([.485,.456,.406],[.229,.224,.225])])
-                        with torch.no_grad():
-                            mp = float(torch.softmax(cnn_model(t(pil).unsqueeze(0)), 1)[0, 1])
-                        st.session_state.mri_prob = mp
-                        os.remove(tmp)
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            fig3, ax = plt.subplots(figsize=(4, 4))
-                            ax.imshow(prev, cmap="gray"); ax.axis("off")
-                            st.pyplot(fig3, use_container_width=True); plt.close(fig3)
-                        with c2:
-                            ri = risk_info(mp)
-                            st.metric("CNN MRI Risk", f"{int(mp * 100)}%")
-                            st.markdown(f"**{ri['emoji']} {ri['headline']}**")
-                        st.success("MRI probability saved. Set fusion weight > 0 in the form.")
-                    else:
-                        st.warning("CNN model not loaded.")
-                except Exception as e:
-                    st.error(str(e))
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# PATIENT MODE — Step-by-step wizard
-# ════════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
+# PATIENT MODE
+# ════════════════════════════════════════════════════════
 else:
-    step  = st.session_state.patient_step
-    pd_   = st.session_state.patient_data
+    step=st.session_state.patient_step; pd_=st.session_state.patient_data
+    STEPS=["📋 Info","🏥 Health","🧠 Memory","🏠 Daily Life","💬 Mood","🔢 Numbers","🕐 Recall","📊 Results"]
+    total=len(STEPS); pct=int((step/max(total-1,1))*100)
+    pills="".join([f'<span class="{"npill-a" if i==step else "npill"}">{s}</span>' for i,s in enumerate(STEPS)])
+    st.markdown(f"""<div style='margin-bottom:10px;line-height:2.4'>{pills}</div>
+    <div class='prog-bg'><div class='prog-fill' style='width:{pct}%'></div></div>
+    <div style='font-size:0.78rem;color:#6366f1 !important;font-weight:700;text-align:right;margin-bottom:20px'>
+    Step {step+1} of {total} — {STEPS[step]}</div>""",unsafe_allow_html=True)
 
-    STEPS = ["Personal Info", "Word Memory Test", "Daily Life Questions",
-             "Mood Questions", "Digit Span Test", "Word Recall", "Results"]
-    total = len(STEPS)
-    pct   = int((step / max(total - 1, 1)) * 100)
+    # ── STEP 0: Personal Info ─────────────────────────────────────────────
+    if step==0:
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900;margin-bottom:6px'>
+        👤 Who is taking this assessment?</h2>""",unsafe_allow_html=True)
+        st.markdown("<p style='color:#64748b !important;margin-bottom:20px'>We'll personalise the results based on your information.</p>",unsafe_allow_html=True)
 
-    pills = "".join([
-        f'<span class="{"nav-pill-active" if i == step else "nav-pill"}">{s}</span> '
-        for i, s in enumerate(STEPS)
-    ])
-    st.markdown(f"""
-    <div style='margin-bottom:8px'>{pills}</div>
-    <div class='progress-track'><div class='progress-fill' style='width:{pct}%'></div></div>
-    <div style='font-size:0.78rem;color:#64748b;text-align:right;margin-bottom:16px'>
-    Step {step + 1} of {total}</div>""", unsafe_allow_html=True)
-
-    # ── STEP 0: Personal Info ─────────────────────────────────────────────────
-    if step == 0:
-        st.markdown("## 👤 Tell us about the person")
         with st.form("p0"):
-            st.markdown('<div class="pat-card">', unsafe_allow_html=True)
-            c1, c2 = st.columns(2)
+            st.markdown('<div class="gcard">',unsafe_allow_html=True)
+            c1,c2=st.columns(2)
             with c1:
-                name = st.text_input("First name (optional)", placeholder="e.g. Ravi")
-                sex  = st.selectbox("Sex at birth",
-                                    ["Male", "Female", "Other / Prefer not to say"])
+                name=st.text_input("Your name (optional)",placeholder="e.g. Ravi")
+                sex=st.selectbox("Sex",["Male","Female","Other / Prefer not to say"])
+                age=st.number_input("Age",40,100,65,1)
             with c2:
-                edu = st.slider("Years of school/college", 0, 25, 10,
-                                 help="0 is perfectly fine — the AI accounts for this")
-                if edu == 0:
-                    st.caption("✅ No formal education — accounted for in the model")
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown("""<div style='background:#eff6ff;border:1px solid #bfdbfe;
-            border-radius:10px;padding:10px 16px;font-size:0.84rem;color:#1e40af;margin-top:8px'>
-            ℹ️ <b>CDR and other clinical scores will be estimated automatically</b>
-            from the tests you complete in the next steps.
-            </div>""", unsafe_allow_html=True)
-            if st.form_submit_button("Continue →", use_container_width=True):
-                pd_["name"] = name; pd_["sex"] = sex; pd_["edu"] = edu
-                st.session_state.patient_step = 1
-                st.session_state.patient_data = pd_
-                for k in ["word_phase", "digit_phase", "current_digit_seq",
-                          "digit_level", "digit_correct", "digit_done"]:
-                    st.session_state.pop(k, None)
+                st.markdown("""<div style='font-weight:700;font-size:1rem;color:#1a1a2e !important;
+                margin-bottom:12px'>🎓 Highest level of education</div>""",unsafe_allow_html=True)
+                edu_choice=st.radio("Education",
+                    ["🏫 No formal education (0 yrs)",
+                     "📚 Schooling — 1st to 10th (10 yrs)",
+                     "🎒 High School — 11th & 12th (12 yrs)",
+                     "🎓 UG / Bachelor's — 4 or 5 years (16 yrs)",
+                     "📖 PG / Master's — 2 years (18 yrs)",
+                     "🔬 Doctorate / PhD (22+ yrs)"],
+                    key="edu_radio", label_visibility="collapsed")
+            st.markdown('</div>',unsafe_allow_html=True)
+
+            edu_map = {
+                "🏫 No formal education (0 yrs)": (0, "No formal education"),
+                "📚 Schooling — 1st to 10th (10 yrs)": (10, "Schooling (1st–10th)"),
+                "🎒 High School — 11th & 12th (12 yrs)": (12, "High School (11th–12th)"),
+                "🎓 UG / Bachelor's — 4 or 5 years (16 yrs)": (16, "UG / Bachelor's"),
+                "📖 PG / Master's — 2 years (18 yrs)": (18, "PG / Master's"),
+                "🔬 Doctorate / PhD (22+ yrs)": (22, "Doctorate / PhD"),
+            }
+
+            if st.form_submit_button("Continue →",use_container_width=True):
+                edu_years, edu_label = edu_map[edu_choice]
+                pd_.update({"name":name,"sex":sex,"age":age,
+                            "edu":edu_years,"edu_label":edu_label})
+                st.session_state.patient_step=1; st.session_state.patient_data=pd_
+                for k in ["word_phase","digit_sequences","digit_level","digit_correct",
+                          "digit_done","digit_phase","digit_results"]:
+                    st.session_state.pop(k,None)
                 st.rerun()
 
-    # ── STEP 1: Word Memory Test ──────────────────────────────────────────────
-    elif step == 1:
-        name     = pd_.get("name", "")
-        greeting = f"Hello {name}! " if name else ""
+    # ── STEP 1: Health History ─────────────────────────────────────────────
+    elif step==1:
+        name=pd_.get("name",""); greeting=f"Hi {name}! " if name else ""
+        st.markdown(f"""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900;margin-bottom:6px'>
+        🏥 {greeting}Health History</h2>""",unsafe_allow_html=True)
+        st.markdown("<p style='color:#64748b !important'>These conditions independently raise memory decline risk. Please answer honestly.</p>",unsafe_allow_html=True)
 
+        with st.form("health_form"):
+            c1,c2=st.columns(2)
+            with c1:
+                for title,sub,key,opts in [
+                    ("🩸 Type 2 Diabetes","Insulin resistance linked to amyloid accumulation","diab",["No ✅","Yes ⚠️"]),
+                    ("💉 High Blood Pressure","Vascular damage accelerates cognitive decline","hyp",["No ✅","Yes ⚠️"]),
+                ]:
+                    st.markdown(f"""<div class='hcard {"hcard-warn" if st.session_state.get(f"_h_{key}","No ✅")=="Yes ⚠️" else ""}'>
+                    <b style='font-size:1.05rem;color:#1a1a2e !important'>{title}</b><br>
+                    <span style='font-size:0.85rem;color:#64748b !important'>{sub}</span></div>""",unsafe_allow_html=True)
+                    st.radio(title,opts,horizontal=True,key=f"hr_{key}",label_visibility="collapsed")
+
+            with c2:
+                st.markdown("""<div class='hcard'><b style='font-size:1.05rem;color:#1a1a2e !important'>🚬 Smoking History</b><br>
+                <span style='font-size:0.85rem;color:#64748b !important'>Significant cerebrovascular risk factor</span></div>""",unsafe_allow_html=True)
+                smoking_r=st.radio("Smoking",["Never ✅","Former","Current ⚠️"],horizontal=True,key="hr_smk",label_visibility="collapsed")
+
+                st.markdown("""<div class='hcard'><b style='font-size:1.05rem;color:#1a1a2e !important'>⚖️ Body Weight (BMI)</b><br>
+                <span style='font-size:0.85rem;color:#64748b !important'>Midlife obesity significantly increases dementia risk</span></div>""",unsafe_allow_html=True)
+                bmi_r=st.slider("BMI",15.0,45.0,25.0,0.5,key="hr_bmi")
+                bl="Underweight" if bmi_r<18.5 else "Healthy Weight ✅" if bmi_r<25 else "Overweight ⚠️" if bmi_r<30 else "Obese ⚠️"
+                bc="#10b981" if bmi_r<25 else "#f59e0b" if bmi_r<30 else "#ef4444"
+                st.markdown(f"<span style='color:{bc} !important;font-weight:800;font-size:1.1rem'>{bl} — BMI {bmi_r:.1f}</span>",unsafe_allow_html=True)
+
+            c1b,c2b=st.columns(2)
+            with c1b:
+                if st.form_submit_button("← Back"): st.session_state.patient_step=0; st.rerun()
+            with c2b:
+                if st.form_submit_button("Continue →",use_container_width=True):
+                    d_val="Yes" if "Yes" in st.session_state.get("hr_diab","No ✅") else "No"
+                    h_val="Yes" if "Yes" in st.session_state.get("hr_hyp","No ✅") else "No"
+                    s_map={"Never ✅":"Never","Former":"Former","Current ⚠️":"Current"}
+                    s_val=s_map.get(smoking_r,"Never")
+                    pd_.update({"diabetes":d_val,"hypertension":h_val,"smoking":s_val,"bmi":float(bmi_r)})
+                    st.session_state.patient_step=2; st.session_state.patient_data=pd_; st.rerun()
+
+    # ── STEP 2: Word Memory ────────────────────────────────────────────────
+    elif step==2:
         if "word_phase" not in st.session_state:
-            st.session_state.word_phase  = "show"
-            st.session_state.words_shown = WORD_LIST[:]
+            st.session_state.word_phase="show"; st.session_state.words_shown=WORD_LIST[:]
+        words=st.session_state.words_shown; words_js=json.dumps(words)
 
-        words    = st.session_state.words_shown
-        words_js = json.dumps(words)
-
-        if st.session_state.word_phase == "show":
-            st.markdown("## 🧠 Word Memory Test — Read & Listen")
-            st.markdown(f"*{greeting}We will show you **{len(words)} words**. "
-                        "Read them carefully and use the button to hear them. "
-                        "**Once you click 'Ready to Recall', the words will disappear** "
-                        "and you must type what you remember.*")
-
-            word_html = "".join([
-                f'<span style="display:inline-block;background:#f5f3ff;border:2px solid #7c3aed;'
-                f'border-radius:12px;padding:10px 18px;margin:6px;font-size:1.15rem;'
-                f'font-weight:700;color:#4c1d95;font-family:monospace">{w.upper()}</span>'
-                for w in words])
-            st.markdown(f"""<div style='background:white;border-radius:20px;
-            border:1px solid #ede9fe;padding:28px 32px;margin:12px 0;
-            box-shadow:0 4px 24px #7c3aed0f'>
-            <h3 style='margin:0 0 16px'>👀 Study these words carefully:</h3>
-            <div style='margin:0 0 8px'>{word_html}</div></div>""",
-            unsafe_allow_html=True)
+        if st.session_state.word_phase=="show":
+            st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+            🧠 Word Memory Test</h2>""",unsafe_allow_html=True)
+            st.markdown(f"<p style='color:#64748b !important'>Study the <b style='color:#6366f1 !important'>{len(words)} words</b> carefully. Use the voice button to hear them. <b>Words disappear once you click Ready</b> — then type what you remember.</p>",unsafe_allow_html=True)
+            wh="".join([f'<span class="wbox">{w.upper()}</span>' for w in words])
+            st.markdown(f"""<div class='gcard'>
+            <h3 style='margin:0 0 16px;color:#1a1a2e !important;font-size:1.2rem;font-weight:800'>👀 Study these words carefully:</h3>
+            <div style='line-height:3.2'>{wh}</div></div>""",unsafe_allow_html=True)
 
             components.html(f"""
-            <div id="controls" style="font-family:sans-serif;margin:8px 0;
-                display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <div style="font-family:Inter,sans-serif;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0">
               <button id="speakBtn" onclick="startSpeech()"
-                style="background:linear-gradient(135deg,#7c3aed,#db2777);color:white;
-                       border:none;border-radius:12px;padding:12px 22px;font-size:0.95rem;
-                       font-weight:700;cursor:pointer">
-                🔊 Listen to All Words</button>
+                style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;border:none;
+                       border-radius:14px;padding:14px 26px;font-size:1rem;font-weight:800;
+                       cursor:pointer;box-shadow:0 6px 20px #6366f144;transition:all 0.2s">
+                🔊 Listen to All Words
+              </button>
               <button id="stopBtn" onclick="stopSpeech()" disabled
-                style="background:#ef4444;color:white;border:none;border-radius:12px;
-                       padding:12px 18px;font-size:0.95rem;font-weight:700;
-                       cursor:pointer;opacity:0.4">⏹ Stop</button>
-              <span id="status" style="color:#64748b;font-size:0.88rem"></span>
+                style="background:#ef4444;color:white;border:none;border-radius:14px;
+                       padding:14px 20px;font-size:1rem;font-weight:800;cursor:pointer;opacity:0.4">
+                ⏹ Stop
+              </button>
+              <span id="status" style="color:#6366f1;font-size:0.92rem;font-weight:700"></span>
             </div>
-            <div id="countdown-bar" style="display:none;margin-top:10px">
-              <div style="font-size:0.85rem;color:#7c3aed;margin-bottom:4px">
+            <div id="cdb" style="display:none;margin-top:12px">
+              <div style="font-size:0.9rem;color:#6366f1;font-weight:700;margin-bottom:6px">
                 ⏱ Study time: <b id="timer">60</b>s remaining</div>
-              <div style="background:#ede9fe;border-radius:999px;height:6px">
-                <div id="bar" style="background:linear-gradient(90deg,#7c3aed,#db2777);
-                     border-radius:999px;height:6px;width:100%;
-                     transition:width 1s linear"></div>
+              <div style="background:#e0e7ff;border-radius:999px;height:10px">
+                <div id="bar" style="background:linear-gradient(90deg,#6366f1,#8b5cf6,#ec4899);
+                     border-radius:999px;height:10px;width:100%;transition:width 1s linear"></div>
               </div>
             </div>
             <script>
-            const words = {words_js};
-            let speaking = false; let cdTimer = null; let timeLeft = 60;
-            function startSpeech() {{
-              window.speechSynthesis.cancel(); speaking = true;
-              document.getElementById('speakBtn').disabled = true;
-              document.getElementById('stopBtn').disabled = false;
-              document.getElementById('stopBtn').style.opacity = '1';
-              document.getElementById('status').innerText = 'Playing...';
-              document.getElementById('countdown-bar').style.display = 'block';
-              startCountdown();
-              let idx = 0;
-              function next() {{
-                if(!speaking || idx >= words.length) {{
-                  document.getElementById('status').innerText = speaking ? '✅ Done!' : '⏹ Stopped.';
-                  document.getElementById('speakBtn').disabled = false;
-                  document.getElementById('speakBtn').innerText = '🔊 Listen Again';
-                  document.getElementById('stopBtn').disabled = true;
-                  document.getElementById('stopBtn').style.opacity = '0.4'; return;
+            const words={words_js}; let speaking=false,cdTimer=null,tl=60;
+            function startSpeech(){{
+              window.speechSynthesis.cancel(); speaking=true;
+              document.getElementById('speakBtn').disabled=true;
+              document.getElementById('stopBtn').disabled=false;
+              document.getElementById('stopBtn').style.opacity='1';
+              document.getElementById('status').innerText='▶ Playing...';
+              document.getElementById('cdb').style.display='block';
+              startCD(); let idx=0;
+              function next(){{
+                if(!speaking||idx>=words.length){{
+                  document.getElementById('status').innerText=speaking?'✅ All words played!':'⏹ Stopped.';
+                  document.getElementById('speakBtn').disabled=false;
+                  document.getElementById('speakBtn').innerText='🔊 Listen Again';
+                  document.getElementById('stopBtn').disabled=true;
+                  document.getElementById('stopBtn').style.opacity='0.4'; return;
                 }}
-                document.getElementById('status').innerText = 'Word ' + (idx+1) + '/' + words.length + ':  ' + words[idx].toUpperCase();
-                const u = new SpeechSynthesisUtterance(words[idx]);
-                u.rate = 0.8; u.onend = () => {{ idx++; setTimeout(next, 500); }};
+                document.getElementById('status').innerText='▶ '+(idx+1)+'/'+words.length+': '+words[idx].toUpperCase();
+                const u=new SpeechSynthesisUtterance(words[idx]); u.rate=0.75;
+                u.onend=()=>{{idx++;setTimeout(next,600);}};
                 window.speechSynthesis.speak(u);
-              }}
-              next();
+              }} next();
             }}
-            function stopSpeech() {{
-              speaking = false; window.speechSynthesis.cancel();
-              document.getElementById('speakBtn').disabled = false;
-              document.getElementById('speakBtn').innerText = '🔊 Listen Again';
-              document.getElementById('stopBtn').disabled = true;
-              document.getElementById('stopBtn').style.opacity = '0.4';
-              document.getElementById('status').innerText = '⏹ Stopped.';
+            function stopSpeech(){{
+              speaking=false; window.speechSynthesis.cancel();
+              document.getElementById('speakBtn').disabled=false;
+              document.getElementById('speakBtn').innerText='🔊 Listen Again';
+              document.getElementById('stopBtn').disabled=true;
+              document.getElementById('stopBtn').style.opacity='0.4';
+              document.getElementById('status').innerText='⏹ Stopped.';
             }}
-            function startCountdown() {{
-              if(cdTimer) clearInterval(cdTimer); timeLeft = 60;
-              cdTimer = setInterval(() => {{
-                timeLeft--;
-                document.getElementById('timer').innerText = timeLeft;
-                document.getElementById('bar').style.width = (timeLeft/60*100) + '%';
-                if(timeLeft <= 0) {{ clearInterval(cdTimer); document.getElementById('status').innerText = '⏰ Time up!'; }}
-              }}, 1000);
+            function startCD(){{
+              if(cdTimer)clearInterval(cdTimer); tl=60;
+              cdTimer=setInterval(()=>{{
+                tl--; document.getElementById('timer').innerText=tl;
+                document.getElementById('bar').style.width=(tl/60*100)+'%';
+                if(tl<=0){{clearInterval(cdTimer);document.getElementById('status').innerText='⏰ Time up!';}}
+              }},1000);
             }}
-            </script>""", height=120)
+            </script>""",height=145)
 
-            st.warning("📌 **Study the words above carefully. Once you click below, "
-                       "the words will be hidden.**")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("← Back"):
-                    st.session_state.patient_step = 0; st.rerun()
-            with col2:
-                if st.button("✅  I'm Ready — Hide Words & Start Recall",
-                             use_container_width=True):
-                    st.session_state.word_phase = "recall"; st.rerun()
+            st.warning("📌 **Important:** Once you click the button below, all words disappear permanently.")
+            c1,c2=st.columns(2)
+            with c1:
+                if st.button("← Back"): st.session_state.patient_step=1; st.rerun()
+            with c2:
+                if st.button("✅  I'm Ready — Hide Words & Recall",use_container_width=True):
+                    st.session_state.word_phase="recall"; st.rerun()
 
-        else:
-            st.markdown("## ✍️ Now Recall the Words")
-            st.markdown("*The words are now hidden. Type every word you can remember.*")
-            st.markdown('<div class="pat-card">', unsafe_allow_html=True)
-            st.markdown("**Type the words you remember — separated by spaces or commas:**")
-            immediate_input = st.text_area("Your answer:", height=100,
-                                            key="imm_recall", placeholder="")
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.info("💡 Don't worry if you can't remember all of them — just write what you can.")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("← Go back and study again"):
-                    st.session_state.word_phase = "show"; st.rerun()
-            with col2:
-                if st.button("Submit & Continue →", use_container_width=True):
-                    recalled    = [w.strip().lower()
-                                   for w in immediate_input.replace(",", " ").split()
-                                   if w.strip()]
-                    words_set   = set(w.lower() for w in words)
-                    correct_imm = [w for w in recalled if w in words_set]
-                    pd_["immediate_recall"] = correct_imm
-                    pd_["rv_imm"]           = min(len(correct_imm) * 3.5, 75)
-                    st.session_state.patient_step = 2
-                    st.session_state.patient_data = pd_; st.rerun()
+        else:  # recall phase
+            st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+            ✍️ What words do you remember?</h2>""",unsafe_allow_html=True)
+            st.markdown("<p style='color:#64748b !important'>The words are hidden now. Type every word that comes to mind.</p>",unsafe_allow_html=True)
+            st.markdown('<div class="gcard">',unsafe_allow_html=True)
+            # Auto-focus the textarea via JS + only one input box (removed the duplicate)
+            components.html("""<script>
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    var areas = window.parent.document.querySelectorAll('textarea');
+                    if(areas.length > 0) { areas[0].focus(); }
+                }, 500);
+            });
+            </script>""", height=0)
+            imm=st.text_area("Type the words (separate with spaces or commas):",
+                              height=130, key="imm_recall",
+                              placeholder="e.g.  drum   coffee   moon   school   hat   farmer...")
+            st.markdown('</div>',unsafe_allow_html=True)
+            st.info("💡 Don't worry about spelling — just write everything you can recall.")
+            # Only Submit button — Back button removed
+            if st.button("Submit & Continue →", use_container_width=True):
+                recalled=[w.strip().lower() for w in imm.replace(","," ").split() if w.strip()]
+                correct_imm=[w for w in recalled if w in set(w.lower() for w in words)]
+                pd_.update({"immediate_recall":correct_imm,"rv_imm":min(len(correct_imm)*3.5,75)})
+                st.session_state.patient_step=3; st.session_state.patient_data=pd_; st.rerun()
 
-    # ── STEP 2: Daily Life Questions (FAQ) ────────────────────────────────────
-    elif step == 2:
-        st.markdown("## 🏠 Daily Life Questions")
-        st.markdown("*For each activity, how much help does the person need?*")
+    # ── STEP 3: Daily Life — 2-column interactive grid ────────────────────
+    elif step==3:
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+        🏠 Daily Life Questions</h2>""",unsafe_allow_html=True)
+        st.markdown("<p style='color:#64748b !important'>For each activity, tap to show how much help is needed.</p>",unsafe_allow_html=True)
+
+        # Initialize FAQ answers with None (not pre-selected)
+        for emoji,question in FAQ_ITEMS:
+            if f"faq_{question}" not in st.session_state.faq_answers:
+                st.session_state.faq_answers[f"faq_{question}"] = None
+
         faq_score = 0
-        options   = ["No help needed", "Sometimes needs help",
-                     "Often needs help", "Cannot do it at all"]
-        with st.form("faq_form"):
-            for q in FAQ_QUESTIONS:
-                resp = st.selectbox(f"**{q}**", options, key=f"faq_{q}")
-                faq_score += options.index(resp)
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.form_submit_button("← Back"):
-                    st.session_state.patient_step = 1; st.rerun()
-            with c2:
-                if st.form_submit_button("Continue →", use_container_width=True):
-                    if faq_score <= 2:    cdr_g, cdrsb = 0.0,  0.0
-                    elif faq_score <= 6:  cdr_g, cdrsb = 0.5,  2.0
-                    elif faq_score <= 14: cdr_g, cdrsb = 1.0,  4.5
-                    elif faq_score <= 22: cdr_g, cdrsb = 2.0,  9.0
-                    else:                 cdr_g, cdrsb = 3.0, 14.0
-                    pd_["faq"]   = faq_score
-                    pd_["cdr_g"] = cdr_g
-                    pd_["cdrsb"] = cdrsb
-                    st.session_state.patient_step = 3
-                    st.session_state.patient_data = pd_; st.rerun()
+        all_answered = True
 
-    # ── STEP 3: Mood Questions (GDS) ──────────────────────────────────────────
-    elif step == 3:
-        st.markdown("## 💬 Mood & Wellbeing")
-        st.markdown("*Answer Yes or No for each question about how you have felt "
-                    "**over the past week**.*")
-        gds_score = 0
+        # 2-column grid
+        pairs = [(FAQ_ITEMS[i], FAQ_ITEMS[i+1] if i+1 < len(FAQ_ITEMS) else None)
+                 for i in range(0, len(FAQ_ITEMS), 2)]
+
+        for left, right in pairs:
+            c1, c2 = st.columns(2)
+            for col, item in [(c1, left), (c2, right)]:
+                if item is None: continue
+                emoji, question = item
+                key = f"faq_{question}"
+                current = st.session_state.faq_answers.get(key)
+
+                with col:
+                    st.markdown(f"""<div style='background:white;border-radius:16px;border:2px solid #e0e7ff;
+                    padding:18px 20px;margin:6px 0;box-shadow:0 2px 12px #6366f108'>
+                    <span style='font-size:1.3rem'>{emoji}</span>
+                    <span style='font-weight:700;font-size:0.95rem;color:#1a1a2e !important;margin-left:8px'>{question}</span>
+                    </div>""",unsafe_allow_html=True)
+
+                    sel = st.select_slider(
+                        f"_{question}",
+                        options=["— Select —","✅ No help","🤔 Sometimes","😟 Often","❌ Cannot do"],
+                        key=f"sl_{question}",
+                        label_visibility="collapsed"
+                    )
+                    score_map={"— Select —":None,"✅ No help":0,"🤔 Sometimes":1,"😟 Often":2,"❌ Cannot do":3}
+                    val = score_map[sel]
+                    st.session_state.faq_answers[key] = val
+                    if val is None:
+                        all_answered = False
+                    else:
+                        faq_score += val
+
+        st.markdown("<br>",unsafe_allow_html=True)
+        if not all_answered:
+            st.warning("⚠️ Please answer all questions before continuing.")
+
+        c1b,c2b=st.columns(2)
+        with c1b:
+            if st.button("← Back"): st.session_state.patient_step=2; st.rerun()
+        with c2b:
+            if st.button("Continue →",use_container_width=True):
+                if not all_answered:
+                    st.error("Please answer all 10 questions.")
+                else:
+                    if faq_score<=2: cdr_g,cdrsb=0.0,0.0
+                    elif faq_score<=6: cdr_g,cdrsb=0.5,2.0
+                    elif faq_score<=14: cdr_g,cdrsb=1.0,4.5
+                    elif faq_score<=22: cdr_g,cdrsb=2.0,9.0
+                    else: cdr_g,cdrsb=3.0,14.0
+                    pd_.update({"faq":faq_score,"cdr_g":cdr_g,"cdrsb":cdrsb})
+                    st.session_state.patient_step=4; st.session_state.patient_data=pd_; st.rerun()
+
+    # ── STEP 4: Mood — 2-column card grid ────────────────────────────────
+    elif step==4:
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+        💬 Mood & Wellbeing</h2>""",unsafe_allow_html=True)
+        st.markdown("<p style='color:#64748b !important'>Think about how you felt <b>over the past week</b>. Answer Yes or No for each question.</p>",unsafe_allow_html=True)
+
+        gds_score=0
         with st.form("gds_form"):
-            for i, (q, bad_ans) in enumerate(GDS_QUESTIONS):
-                resp = st.radio(f"**{i+1}. {q}**", ["Yes", "No"],
-                                horizontal=True, key=f"gds_{i}", index=1)
-                if resp.lower() == bad_ans:
-                    gds_score += 1
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.form_submit_button("← Back"):
-                    st.session_state.patient_step = 2; st.rerun()
-            with c2:
-                if st.form_submit_button("Continue →", use_container_width=True):
-                    pd_["gds"] = gds_score
-                    st.session_state.patient_step = 4
-                    st.session_state.patient_data = pd_; st.rerun()
+            pairs=[(GDS_ITEMS[i],GDS_ITEMS[i+1] if i+1<len(GDS_ITEMS) else None)
+                   for i in range(0,len(GDS_ITEMS),2)]
+            for left,right in pairs:
+                c1,c2=st.columns(2)
+                for col,item in [(c1,left),(c2,right)]:
+                    if item is None: continue
+                    emoji,question,bad_ans=item
+                    idx=GDS_ITEMS.index(item)
+                    with col:
+                        st.markdown(f"""<div style='background:white;border-radius:16px;border:2px solid #e0e7ff;
+                        padding:16px 18px;margin:6px 0;box-shadow:0 2px 10px #6366f108'>
+                        <span style='font-size:1.4rem'>{emoji}</span>
+                        <span style='font-weight:600;font-size:0.92rem;color:#1a1a2e !important;margin-left:8px'>{question}</span>
+                        </div>""",unsafe_allow_html=True)
+                        resp=st.radio(f"gq{idx}",["Yes","No"],horizontal=True,
+                                      key=f"gds_{idx}",label_visibility="collapsed",index=1)
+                        if resp.lower()==bad_ans: gds_score+=1
 
-    # ── STEP 4: Digit Span Test ───────────────────────────────────────────────
-    elif step == 4:
-        st.markdown("## 🔢 Number Memory Test")
+            c1b,c2b=st.columns(2)
+            with c1b:
+                if st.form_submit_button("← Back"): st.session_state.patient_step=3; st.rerun()
+            with c2b:
+                if st.form_submit_button("Continue →",use_container_width=True):
+                    pd_["gds"]=gds_score; st.session_state.patient_step=5; st.session_state.patient_data=pd_; st.rerun()
+
+    # ── STEP 5: Digit Span — complete all sequences ────────────────────────
+    elif step==5:
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+        🔢 Number Memory Test</h2>""",unsafe_allow_html=True)
 
         if "digit_sequences" not in st.session_state:
-            base_lengths = [3, 4, 5, 6, 7, 8, 9]
-            seqs = []
-            for length in base_lengths:
-                seq = random.sample(range(1, 10), min(length, 9))
-                while len(seq) < length:
-                    seq.append(random.randint(1, 9))
+            seqs=[]
+            for length in [3,4,5,6,7,8,9]:
+                seq=random.sample(range(1,10),min(length,9))
+                while len(seq)<length: seq.append(random.randint(1,9))
                 seqs.append(seq)
-            st.session_state.digit_sequences = seqs
-            st.session_state.digit_level     = 0
-            st.session_state.digit_correct   = 0
-            st.session_state.digit_done      = False
-            st.session_state.digit_phase     = "show"
+            st.session_state.update({
+                "digit_sequences":seqs,"digit_level":0,
+                "digit_results":[],"digit_done":False,"digit_phase":"show"
+            })
 
-        level = st.session_state.digit_level
-        done  = st.session_state.digit_done
-        seqs  = st.session_state.digit_sequences
-        phase = st.session_state.digit_phase
+        level=st.session_state.digit_level
+        done=st.session_state.digit_done
+        seqs=st.session_state.digit_sequences
+        phase=st.session_state.digit_phase
+        results_log=st.session_state.get("digit_results",[])
 
-        if done:
-            raw_score        = st.session_state.digit_correct
-            digit_span_score = min(raw_score * 2.5, 28)
-            pd_["digit_span"]       = digit_span_score
-            st.session_state.patient_data = pd_
+        if done or level>=len(seqs):
+            # All sequences complete — compute score
+            correct_count=sum(1 for r in results_log if r["correct"])
+            max_correct_span=0
+            for r in results_log:
+                if r["correct"]: max_correct_span=r["length"]
+                else: break  # traditional span = first failure
+            ds_score=min(max_correct_span*2.5,28)
+            pd_["digit_span"]=ds_score; st.session_state.patient_data=pd_
 
-            st.markdown(f"""<div class='pat-card' style='text-align:center'>
-            <div style='font-size:2.5rem'>🎯</div>
-            <h3>Number Test Complete!</h3>
-            <p>You correctly recalled up to <b>{raw_score} digits</b>.</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class='gcard' style='text-align:center;padding:40px'>
+            <div style='font-size:4rem;margin-bottom:12px'>🎯</div>
+            <h2 style='color:#1a1a2e !important;font-size:1.8rem;font-weight:900'>Number Test Complete!</h2>
+            <p style='color:#64748b !important;font-size:1.1rem'>You completed all <b>{len(seqs)}</b> sequences.</p>
+            """,unsafe_allow_html=True)
 
-            st.markdown("---")
-            st.markdown("### 🧲 Brain Scan Upload *(Optional)*")
-            mri_uploaded = st.file_uploader("Upload brain scan (optional)",
-                                             type=["nii", "gz"])
-            if mri_uploaded:
-                with st.spinner("Analysing brain scan…"):
-                    try:
-                        import nibabel as nib, torch
-                        from PIL import Image
-                        import torchvision.transforms as T
-                        tmp = os.path.join(os.environ.get("TEMP", "C:\\Temp"),
-                                           mri_uploaded.name)
-                        with open(tmp, "wb") as f:
-                            f.write(mri_uploaded.read())
-                        d = np.array(nib.load(tmp).get_fdata(), dtype=np.float32)
-                        if d.ndim == 4: d = d[..., 0]
-                        nz = d.shape[2]; mid = int(nz * .5); sls = []
-                        for off in [-1, 0, 1]:
-                            sl = d[:, :, np.clip(mid + off, 0, nz - 1)]
-                            lo, hi = np.percentile(sl, [1, 99])
-                            sl = np.clip((sl - lo) / (hi - lo + 1e-8), 0, 1)
-                            sls.append((sl * 255).astype(np.uint8))
-                        if cnn_model:
-                            rgb = np.stack(sls, 2)
-                            pil = Image.fromarray(rgb, "RGB")
-                            t   = T.Compose([T.Resize((224, 224)), T.ToTensor(),
-                                             T.Normalize([.485,.456,.406],[.229,.224,.225])])
-                            with torch.no_grad():
-                                mp = float(torch.softmax(
-                                    cnn_model(t(pil).unsqueeze(0)), 1)[0, 1])
-                            st.session_state.mri_prob = mp
-                            os.remove(tmp)
-                            st.success(f"✅ Brain scan analysed. MRI risk score: {int(mp*100)}%")
-                        else:
-                            st.warning("CNN model not loaded — MRI skipped.")
-                    except Exception as e:
-                        st.warning(f"Could not process scan: {e}")
+            # Show results table
+            for i,r in enumerate(results_log):
+                icon="✅" if r["correct"] else "❌"
+                color="#10b981" if r["correct"] else "#ef4444"
+                st.markdown(f"""<div style='background:white;border-radius:12px;border:2px solid {color}33;
+                padding:12px 18px;margin:4px 0;display:flex;align-items:center;gap:12px'>
+                <span style='font-size:1.2rem'>{icon}</span>
+                <span style='font-family:monospace;font-size:1.1rem;font-weight:800;
+                color:#1a1a2e !important;letter-spacing:8px'>{" ".join(str(d) for d in r["seq"])}</span>
+                <span style='font-size:0.85rem;color:{color} !important;font-weight:700'>
+                {"Correct" if r["correct"] else f"You typed: {r.get('answer','?')}"}</span>
+                </div>""",unsafe_allow_html=True)
 
-            c1, c2 = st.columns(2)
+            pct_bar=int(ds_score/28*100)
+            st.markdown(f"""<div style='background:#e0e7ff;border-radius:999px;height:14px;margin:16px auto;max-width:300px'>
+            <div style='background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:999px;height:14px;width:{pct_bar}%'></div></div>
+            <div style='font-size:2.5rem;font-weight:900;color:#6366f1 !important'>Score: {int(ds_score)}/28</div>
+            </div>""",unsafe_allow_html=True)
+
+            c1,c2=st.columns(2)
             with c1:
-                if st.button("← Redo Number Test"):
-                    for k in ["digit_sequences", "digit_level", "digit_correct",
-                              "digit_done", "digit_phase"]:
-                        st.session_state.pop(k, None)
+                if st.button("← Redo Test"):
+                    for k in ["digit_sequences","digit_level","digit_results","digit_done","digit_phase"]:
+                        st.session_state.pop(k,None)
                     st.rerun()
             with c2:
-                if st.button("Continue →", use_container_width=True):
-                    st.session_state.patient_step = 5
-                    st.session_state.patient_data = pd_; st.rerun()
+                if st.button("Continue →",use_container_width=True):
+                    st.session_state.patient_step=6; st.session_state.patient_data=pd_; st.rerun()
 
-        elif level >= len(seqs):
-            st.session_state.digit_done = True; st.rerun()
-
-        elif phase == "show":
-            seq     = seqs[level]
-            seq_js  = json.dumps([str(d) for d in seq])
-            seq_str = "  ".join(str(d) for d in seq)
-
-            st.markdown(f"*A sequence of **{len(seq)} numbers** will appear for "
-                        "**5 seconds**, then disappear. Remember the order!*")
-            st.markdown(f"**Sequence {level + 1} of {len(seqs)}:**")
+        elif phase=="show":
+            seq=seqs[level]; seq_js=json.dumps([str(d) for d in seq])
+            seq_str="  ".join(str(d) for d in seq)
+            st.markdown(f"<p style='color:#64748b !important;font-size:1rem'>A <b style='color:#6366f1 !important'>{len(seq)}-digit</b> sequence will appear for <b style='color:#6366f1 !important'>5 seconds</b>, then disappear. Remember the exact order!</p>",unsafe_allow_html=True)
+            st.progress(int((level/len(seqs))*100), text=f"Sequence {level+1} of {len(seqs)}")
 
             components.html(f"""
-            <div id="phase-show" style="font-family:sans-serif">
-              <div id="digit-display"
-                style="font-family:monospace;font-size:3.5rem;font-weight:800;
-                       letter-spacing:18px;text-align:center;color:#1e293b;
-                       padding:28px;background:#f8fafc;border-radius:20px;
-                       border:3px solid #e2e8f0;margin:12px 0">
+            <div style="font-family:Inter,sans-serif">
+              <div id="dd" style="font-family:monospace;font-size:4.5rem;font-weight:900;
+                   letter-spacing:22px;text-align:center;color:#1a1a2e;
+                   padding:36px;background:linear-gradient(135deg,#f0f4ff,#ede9fe);
+                   border-radius:28px;border:3px solid #c7d2fe;margin:14px 0;
+                   text-shadow:0 4px 12px #6366f122;box-shadow:0 8px 32px #6366f115">
                 {seq_str}
               </div>
-              <button id="listenBtn" onclick="readDigits()"
-                style="background:#1e3a5f;color:white;border:none;border-radius:10px;
-                       padding:10px 22px;font-size:0.92rem;font-weight:700;cursor:pointer">
-                🔊 Read digits aloud</button>
-              <div id="countdown-wrap" style="margin-top:16px;display:none">
-                <div style="font-size:1rem;color:#7c3aed;font-weight:700">
+              <button onclick="readDigits()"
+                style="background:linear-gradient(135deg,#1a1a2e,#4f46e5);color:white;
+                       border:none;border-radius:16px;padding:14px 26px;font-size:1rem;
+                       font-weight:800;cursor:pointer;box-shadow:0 6px 20px #1a1a2e33">
+                🔊 Read aloud
+              </button>
+              <div id="cd" style="margin-top:16px;display:none">
+                <div style="font-size:1rem;color:#6366f1;font-weight:800">
                   Hiding in <span id="cdnum">5</span>s…</div>
-                <div style="background:#ede9fe;border-radius:999px;height:8px;margin-top:6px">
-                  <div id="cdbar" style="background:linear-gradient(90deg,#7c3aed,#db2777);
-                       border-radius:999px;height:8px;width:100%;
-                       transition:width 1s linear"></div>
+                <div style="background:#e0e7ff;border-radius:999px;height:12px;margin-top:8px">
+                  <div id="cdbar" style="background:linear-gradient(90deg,#6366f1,#8b5cf6);
+                       border-radius:999px;height:12px;width:100%;transition:width 1s linear"></div>
                 </div>
               </div>
             </div>
             <script>
-            const digits = {seq_js}; let started = false;
-            function readDigits() {{
-              window.speechSynthesis.cancel();
-              document.getElementById('listenBtn').disabled = true;
-              let i = 0;
-              function next() {{
-                if(i < digits.length) {{
-                  const u = new SpeechSynthesisUtterance(digits[i]);
-                  u.rate = 0.7; u.onend = () => {{ i++; setTimeout(next, 400); }};
+            const digits={seq_js}; let started=false;
+            function readDigits(){{
+              window.speechSynthesis.cancel(); let i=0;
+              function next(){{
+                if(i<digits.length){{
+                  const u=new SpeechSynthesisUtterance(digits[i]); u.rate=0.65; u.pitch=1.1;
+                  u.onend=()=>{{i++;setTimeout(next,500);}};
                   window.speechSynthesis.speak(u);
-                }} else {{ if(!started) {{ started=true; startHideCountdown(); }} }}
-              }}
-              next();
+                }} else {{ if(!started){{started=true;startHide();}} }}
+              }} next();
             }}
-            function startHideCountdown() {{
-              document.getElementById('countdown-wrap').style.display='block';
-              let t = 5;
-              const iv = setInterval(() => {{
-                t--; document.getElementById('cdnum').innerText = t;
-                document.getElementById('cdbar').style.width = (t/5*100)+'%';
-                if(t <= 0) {{
+            function startHide(){{
+              document.getElementById('cd').style.display='block'; let t=5;
+              const iv=setInterval(()=>{{
+                t--; document.getElementById('cdnum').innerText=t;
+                document.getElementById('cdbar').style.width=(t/5*100)+'%';
+                if(t<=0){{
                   clearInterval(iv);
-                  document.getElementById('digit-display').style.visibility='hidden';
-                  document.getElementById('digit-display').innerText = '';
-                  document.getElementById('countdown-wrap').innerHTML =
-                    '<div style="color:#10b981;font-weight:700">✅ Numbers hidden! Type your answer below.</div>';
+                  document.getElementById('dd').innerHTML=
+                    '<div style="text-align:center;font-size:1.3rem;color:#6366f1;font-weight:900;padding:24px">✅ Numbers hidden!<br>Type your answer below.</div>';
+                  document.getElementById('dd').style.background='#f0fdf4';
+                  document.getElementById('dd').style.borderColor='#86efac';
                 }}
-              }}, 1000);
+              }},1000);
             }}
-            setTimeout(() => {{ if(!started) {{ started=true; startHideCountdown(); }} }}, 5000);
-            </script>""", height=200)
+            setTimeout(()=>{{if(!started){{started=true;startHide();}}}},5000);
+            </script>""",height=230)
 
-            st.info("⏱ Numbers auto-hide after 5 seconds.")
-            if st.button("Numbers are hidden — I'm ready to type →",
-                          use_container_width=True, key=f"ready_{level}"):
-                st.session_state.digit_phase = "type"; st.rerun()
+            st.info("⏱ Auto-hides after 5 seconds. You can click 🔊 to hear the digits.")
+            if st.button("I'm ready to type →",use_container_width=True,key=f"ready_{level}"):
+                st.session_state.digit_phase="type"; st.rerun()
 
-        else:
-            seq    = seqs[level]
-            st.markdown(f"**Type the {len(seq)} numbers you just saw (no spaces):**")
-            answer = st.text_input("Your answer:", key=f"ans_{level}", placeholder="")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("← See sequence again", key=f"back_{level}"):
-                    st.session_state.digit_phase = "show"; st.rerun()
-            with c2:
-                if st.button("Submit →", use_container_width=True, key=f"sub_{level}"):
-                    correct = "".join(str(d) for d in seq)
-                    if answer.strip().replace(" ", "") == correct:
-                        st.success("✅ Correct!")
-                        st.session_state.digit_correct = level + 1
-                        st.session_state.digit_level   = level + 1
-                        st.session_state.digit_phase   = "show"
-                    else:
-                        st.error(f"❌ Correct answer was: **{correct}**")
-                        st.session_state.digit_done = True
-                    st.rerun()
+        else:  # type phase
+            seq=seqs[level]
+            st.markdown(f"""<h3 style='color:#1a1a2e !important;font-size:1.4rem;font-weight:800'>
+            Type the {len(seq)} numbers in the correct order:</h3>
+            <p style='color:#64748b !important'>No spaces — just type the digits straight, e.g. <b style='color:#6366f1 !important'>47293</b></p>""",unsafe_allow_html=True)
 
-    # ── STEP 5: Delayed Word Recall ───────────────────────────────────────────
-    elif step == 5:
-        st.markdown("## 🕐 Do You Remember the Words?")
-        words_shown = st.session_state.get("words_shown", WORD_LIST)
-        st.markdown("*Earlier, we showed you 15 words. Write down every word you can remember.*")
-        st.markdown('<div class="pat-card">', unsafe_allow_html=True)
-        delayed_input = st.text_area("Words you remember:", height=100,
-                                      key="del_recall", placeholder="")
-        show_hint = st.checkbox("I give up — show me the original list")
-        if show_hint:
-            word_html = "".join([f'<span class="word-box">{w.upper()}</span>'
-                                  for w in words_shown])
-            st.markdown(f'<div style="margin:10px 0">{word_html}</div>',
-                        unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("← Back"):
-                st.session_state.patient_step = 4; st.rerun()
-        with c2:
-            if st.button("See My Results →", use_container_width=True):
-                recalled_del = [w.strip().lower()
-                                for w in delayed_input.replace(",", " ").split()
-                                if w.strip()]
-                words_set   = set(w.lower() for w in words_shown)
-                correct_del = [w for w in recalled_del if w in words_set]
-                correct_imm = pd_.get("immediate_recall", [])
-                pd_["rv_del"]       = float(len(correct_del))
-                pd_["rv_fo"]        = float(max(len(correct_imm) - len(correct_del), 0))
-                pd_["correct_del"]  = correct_del
-                st.session_state.patient_step = 6
-                st.session_state.patient_data = pd_; st.rerun()
+            # Auto-focus input
+            components.html("""<script>
+            window.addEventListener('load',function(){
+                setTimeout(function(){
+                    var inputs=window.parent.document.querySelectorAll('input[type="text"]');
+                    if(inputs.length>0){inputs[inputs.length-1].focus();}
+                },400);
+            });
+            </script>""",height=0)
 
-    # ── STEP 6: Results ───────────────────────────────────────────────────────
-    elif step == 6:
-        st.markdown("## 📊 Your Results")
+            answer=st.text_input("",key=f"ans_{level}",
+                                  placeholder=f"Type {len(seq)} digits here...",
+                                  label_visibility="collapsed")
 
-        rv_del   = float(pd_.get("rv_del",    7))
-        rv_fo    = float(pd_.get("rv_fo",     4))
-        rv_imm   = float(pd_.get("rv_imm",   35))
-        ds_score = float(pd_.get("digit_span",14))
-        faq      = float(pd_.get("faq",       5))
-        gds      = float(pd_.get("gds",       2))
-        cdr_g    = float(pd_.get("cdr_g",    0.5))
-        cdrsb    = float(pd_.get("cdrsb",    1.5))
-        edu      = float(pd_.get("edu",      12))
-        sex_val  = 0.0 if pd_.get("sex", "Male") in ["Male"] else 1.0
+            if st.button("✅  Submit →",use_container_width=True,key=f"sub_{level}"):
+                correct_str="".join(str(d) for d in seq)
+                is_correct=answer.strip().replace(" ","")==correct_str
+                results_log.append({"level":level,"seq":seq,"answer":answer.strip(),
+                                     "correct":is_correct,"length":len(seq)})
+                st.session_state.digit_results=results_log
+                # Continue to next sequence regardless of correct/wrong
+                st.session_state.digit_level=level+1
+                st.session_state.digit_phase="show"
+                if level+1>=len(seqs): st.session_state.digit_done=True
+                st.rerun()
 
-        mmse=26.0; moca=23.0; adas13=18.0; adas11=13.0; trails=120.0
+    # ── STEP 6: Delayed Word Recall ───────────────────────────────────────
+    elif step==6:
+        words_shown=st.session_state.get("words_shown",WORD_LIST)
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+        🕐 Word Recall</h2>""",unsafe_allow_html=True)
+        st.markdown(f"<p style='color:#64748b !important'>Earlier we showed you <b style='color:#6366f1 !important'>{len(words_shown)} words</b>. They're still hidden. Type every word you can remember now.</p>",unsafe_allow_html=True)
 
-        vals = {
-            "PTGENDER":    sex_val,   "PTEDUCAT":  edu,
-            "MMSE_BL":     mmse,      "MOCA_BL":   moca,
-            "ADAS11_BL":   adas11,    "ADAS13_BL": adas13,
-            "FAQ_BL":      faq,       "GDS_BL":    gds,
-            "CDR_GLOBAL_BL": cdr_g,   "CDRSB_BL":  cdrsb,
-            "RAVLT_forgetting": rv_fo, "RAVLT_immediate": rv_imm,
-            "RAVLT_delayed":    rv_del, "DigitSpan": ds_score,
-            "TrailsB":     trails,
-        }
-        vals = compute_composites(vals)
+        st.markdown('<div class="gcard">',unsafe_allow_html=True)
+        # Auto-focus the textarea
+        components.html("""<script>
+        window.addEventListener('load',function(){
+            setTimeout(function(){
+                var areas=window.parent.document.querySelectorAll('textarea');
+                if(areas.length>0){areas[0].focus();}
+            },500);
+        });
+        </script>""",height=0)
 
-        if not primary:
-            st.error("AI model not loaded."); st.stop()
+        delayed_input=st.text_area(
+            "Type the words you remember (spaces or commas between them):",
+            height=130, key="del_recall",
+            placeholder="e.g.  drum   moon   coffee   school   hat...")
+        st.markdown('</div>',unsafe_allow_html=True)
+        st.info("💡 Take your time. Even partial words count if the meaning is clear.")
 
-        X    = np.array([[vals[f] for f in ALL_FEATURES]])
-        prob = float(primary.predict_proba(X)[0, 1])
+        # Only See Results button — no Back button
+        if st.button("📊  See My Results →",use_container_width=True):
+            recalled_del=[w.strip().lower() for w in delayed_input.replace(","," ").split() if w.strip()]
+            correct_del=[w for w in recalled_del if w in set(w.lower() for w in words_shown)]
+            correct_imm=pd_.get("immediate_recall",[])
+            pd_.update({"rv_del":float(len(correct_del)),
+                        "rv_fo":float(max(len(correct_imm)-len(correct_del),0)),
+                        "correct_del":correct_del})
+            st.session_state.patient_step=7; st.session_state.patient_data=pd_; st.rerun()
 
-        mri_prob = st.session_state.get("mri_prob", None)
-        if mri_prob is not None:
-            prob = 0.75 * prob + 0.25 * mri_prob
+    # ── STEP 7: Results ───────────────────────────────────────────────────
+    elif step==7:
+        st.markdown("""<h2 style='color:#1a1a2e !important;font-size:2rem;font-weight:900'>
+        📊 Your Assessment Results</h2>""",unsafe_allow_html=True)
 
-        # Patient mode uses balanced threshold by default
-        risk = risk_info(prob, threshold=0.35)
-        st.session_state.risk = risk
-        st.session_state.vals = vals
+        rv_del=float(pd_.get("rv_del",7)); rv_fo=float(pd_.get("rv_fo",4))
+        rv_imm=float(pd_.get("rv_imm",35)); ds=float(pd_.get("digit_span",14))
+        faq=float(pd_.get("faq",5)); gds=float(pd_.get("gds",2))
+        cdr_g=float(pd_.get("cdr_g",0.5)); cdrsb=float(pd_.get("cdrsb",1.5))
+        edu=float(pd_.get("edu",12)); sex_val=0.0 if pd_.get("sex","Male")=="Male" else 1.0
+        correct_del=pd_.get("correct_del",[]); correct_imm=pd_.get("immediate_recall",[])
 
-        # Summary metrics
-        correct_del = pd_.get("correct_del", [])
-        correct_imm = pd_.get("immediate_recall", [])
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Words recalled (immediate)", f"{len(correct_imm)} / 15")
-        sc2.metric("Words recalled (after delay)", f"{len(correct_del)} / 15",
-                   delta=str(len(correct_del) - len(correct_imm)) if correct_imm else None)
-        sc3.metric("Digit Span", f"{int(ds_score)}")
-        sc4.metric("Daily activities difficulty", f"{int(faq)} / 30")
+        vals={"PTGENDER":sex_val,"PTEDUCAT":edu,"MMSE_BL":26.0,"MOCA_BL":23.0,
+              "ADAS11_BL":13.0,"ADAS13_BL":18.0,"FAQ_BL":faq,"GDS_BL":gds,
+              "CDR_GLOBAL_BL":cdr_g,"CDRSB_BL":cdrsb,"RAVLT_forgetting":rv_fo,
+              "RAVLT_immediate":rv_imm,"RAVLT_delayed":rv_del,"DigitSpan":ds,"TrailsB":120.0}
+        vals=compute_composites(vals)
+
+        if not primary: st.error("AI model not loaded."); st.stop()
+        X=np.array([[vals[f] for f in ALL_FEATURES]]); prob=float(primary.predict_proba(X)[0,1])
+
+        # If no scores were actually entered (all defaults), show 0
+        if rv_imm==0 and rv_del==0 and ds==0 and faq==0:
+            prob=0.0
+        risk=risk_info(prob,threshold=0.35)
+
+        # Save to backend
+        save_patient_result(pd_,risk,prob,correct_imm,correct_del,ds,faq,gds)
+
+        # ── Score summary cards ──
+        sc1,sc2,sc3,sc4=st.columns(4)
+        for col,num,denom,label,color in [
+            (sc1,len(correct_imm),15,"Words\n(immediate)","#6366f1"),
+            (sc2,len(correct_del),15,"Words\n(after delay)","#10b981" if len(correct_del)>=len(correct_imm)*0.7 else "#ef4444"),
+            (sc3,int(ds),28,"Digit\nSpan","#8b5cf6"),
+            (sc4,int(faq),30,"Daily\nDifficulty","#f59e0b")]:
+            pct_bar=int(num/max(denom,1)*100)
+            col.markdown(f"""<div class='mcard'>
+            <div style='font-size:2.2rem;font-weight:900;color:{color} !important'>
+                {num}<span style='font-size:1rem;font-weight:600;color:#94a3b8 !important'>/{denom}</span>
+            </div>
+            <div style='font-size:0.82rem;color:#64748b !important;margin:6px 0;white-space:pre-line'>{label}</div>
+            <div style='background:#e0e7ff;border-radius:999px;height:6px;margin-top:8px'>
+            <div style='background:{color};border-radius:999px;height:6px;width:{pct_bar}%'></div></div>
+            </div>""",unsafe_allow_html=True)
 
         st.markdown("---")
-        mri_note = (
-            "<div style='margin-top:10px;font-size:0.82rem;color:#64748b'>"
-            "Combined: clinical scores (75%) + brain scan (25%)</div>"
-            if mri_prob else ""
-        )
-        st.markdown(
-            f"""<div class="{risk['cls']}">
-            <div style='font-size:3.5rem;margin-bottom:8px'>{risk['emoji']}</div>
-            <div style='font-family:IBM Plex Mono,monospace;font-size:4rem;
-                 font-weight:800;line-height:1;color:{risk["color"]}'>{risk['pct']}%</div>
-            <div style='font-size:1.5rem;font-weight:800;color:{risk["color"]};
-                 margin:10px 0'>{risk['headline']}</div>
-            <div style='font-size:1rem;color:#374151;max-width:600px;
-                 margin:0 auto;line-height:1.8'>{risk['plain']}</div>
-            {mri_note}
-            </div>""",
-            unsafe_allow_html=True,
-        )
 
-        # Plain-language SHAP
+        # ── Main result + gauge ──
+        rr1,rr2=st.columns([1,1])
+        with rr1:
+            fig=go.Figure(go.Indicator(mode="gauge+number",value=risk["pct"],
+                title={"text":"Conversion Risk","font":{"size":16,"color":"#1a1a2e"}},
+                number={"suffix":"%","font":{"size":56,"color":risk["color"]}},
+                gauge={"axis":{"range":[0,100]},"bar":{"color":risk["color"],"thickness":0.35},
+                       "bgcolor":"white",
+                       "steps":[{"range":[0,35],"color":"#f0fdf4"},{"range":[35,65],"color":"#fffbeb"},{"range":[65,100],"color":"#fef2f2"}],
+                       "threshold":{"line":{"color":"#94a3b8","width":2},"value":50}}))
+            fig.update_layout(height=300,paper_bgcolor="white",margin=dict(t=60,b=10,l=20,r=20))
+            st.plotly_chart(fig,use_container_width=True)
+
+        with rr2:
+            st.markdown(f'<div class="{risk["cls"]}">',unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:4.5rem'>{risk['emoji']}</div>",unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:1.8rem;font-weight:900;color:{risk[\"color\"]} !important'>{risk['headline']}</div>",unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:1rem;color:#374151 !important;margin-top:14px;line-height:1.9'>{risk['plain']}</div>",unsafe_allow_html=True)
+            st.markdown('</div>',unsafe_allow_html=True)
+
+            # Ensemble comparison (also shown in patient mode)
+            if len(models)>1:
+                st.markdown("**Model comparison:**")
+                for nm,mdl in models.items():
+                    mp2=float(mdl.predict_proba(X)[0,1])
+                    col_m="#ef4444" if mp2>=0.65 else "#f59e0b" if mp2>=0.35 else "#10b981"
+                    st.markdown(f"""<div style='background:white;border-radius:10px;border:2px solid #e0e7ff;
+                    padding:10px 16px;margin:4px 0;display:flex;justify-content:space-between;align-items:center'>
+                    <span style='font-weight:600;color:#1a1a2e !important'>{nm}</span>
+                    <span style='font-size:1.3rem;font-weight:900;color:{col_m} !important'>{mp2:.3f}</span>
+                    </div>""",unsafe_allow_html=True)
+
+        # ── Comorbidity flags ──
+        com_flags=comorbidity_flags(pd_.get("diabetes","No"),pd_.get("hypertension","No"),
+                                    pd_.get("smoking","Never"),pd_.get("bmi",25.0))
+        if com_flags:
+            st.markdown("---")
+            st.markdown("### 🏥 Additional Risk Factors")
+            for em,title,desc,bg,bc in com_flags:
+                st.markdown(f"""<div style='background:{bg};border-radius:14px;border-left:5px solid {bc};
+                padding:14px 20px;margin:8px 0;box-shadow:0 2px 8px {bc}15'>
+                <b style='font-size:1rem;color:#1a1a2e !important'>{em} {title}</b><br>
+                <span style='font-size:0.88rem;color:#374151 !important'>{desc}</span></div>""",unsafe_allow_html=True)
+
+        # ── SHAP factors ──
         st.markdown("---")
-        st.markdown("### 🔍 What is affecting the result most?")
-        PLAIN_EXPLANATIONS = {
-            "ADAS13_BL":          ("Thinking errors score",          "higher = more concern", True),
-            "RAVLT_delayed":      ("Words remembered after a delay", "lower = more concern",  False),
-            "DigitSpan":          ("Number memory (digit span)",     "lower = more concern",  False),
-            "CDRSB_BL":           ("Daily function difficulty",      "higher = more concern", True),
-            "FAQ_BL":             ("Daily activities difficulty",    "higher = more concern", True),
-            "MMSE_BL":            ("Short memory test score",        "lower = more concern",  False),
-            "RAVLT_immediate":    ("Words recalled in total",        "lower = more concern",  False),
-            "RAVLT_forgetting":   ("Words forgotten over time",      "higher = more concern", True),
-            "TrailsB":            ("Mental flexibility speed",       "slower = more concern", True),
-            "MOCA_BL":            ("Overall thinking test",          "lower = more concern",  False),
-            "CDR_GLOBAL_BL":      ("Overall memory rating",          "higher = more concern", True),
-            "MMSE_FAQ_composite": ("Memory vs daily function gap",   "lower = more concern",  False),
-            "ADAS_MMSE_gap":      ("Thinking difficulty index",      "higher = more concern", True),
-            "RAVLT_forget_rate":  ("Rate of forgetting",             "higher = more concern", True),
-            "GDS_BL":             ("Mood / depression signs",        "higher = more concern", True),
-            "ADAS11_BL":          ("Thinking test errors",           "higher = more concern", True),
-            "PTEDUCAT":           ("Years of education",             "fewer years = some risk", False),
-            "PTGENDER":           ("Sex",                            "minor factor",           False),
-        }
-
+        st.markdown("### 🔍 What is driving your result?")
+        PLAIN={"ADAS13_BL":("Thinking errors","higher = more concern"),
+               "RAVLT_delayed":("Words recalled after delay","lower = more concern"),
+               "DigitSpan":("Number memory","lower = more concern"),
+               "CDRSB_BL":("Daily function difficulty","higher = more concern"),
+               "FAQ_BL":("Daily activities difficulty","higher = more concern"),
+               "MMSE_BL":("Short memory test","lower = more concern"),
+               "RAVLT_immediate":("Total words recalled","lower = more concern"),
+               "RAVLT_forgetting":("Words forgotten over time","higher = more concern"),
+               "GDS_BL":("Mood / depression","higher = more concern"),
+               "CDR_GLOBAL_BL":("Overall memory rating","higher = more concern"),
+               "MMSE_FAQ_composite":("Memory vs function gap","lower = more concern"),
+               "ADAS_MMSE_gap":("Thinking difficulty index","higher = more concern"),
+               "RAVLT_forget_rate":("Rate of forgetting","higher = more concern"),
+               "TrailsB":("Mental flexibility","slower = more concern"),
+               "ADAS11_BL":("Thinking test errors","higher = more concern"),
+               "PTEDUCAT":("Years of education","fewer = some risk"),
+               "PTGENDER":("Sex","minor factor"),
+               "MOCA_BL":("Overall thinking test","lower = more concern")}
         try:
-            if hasattr(primary, "steps"):
-                from sklearn.pipeline import Pipeline as SKPipeline
-                xgb_model = primary.steps[-1][1]
-                if len(primary.steps) > 1:
-                    pre = SKPipeline(primary.steps[:-1])
-                    try:    X_shap = pre.transform(X)
-                    except: X_shap = X
-                else:
-                    X_shap = X
-            else:
-                xgb_model = primary
-                X_shap    = X
-
-            exp      = shap.TreeExplainer(xgb_model)
-            sv       = exp.shap_values(X_shap)[0]
-            top_idx  = np.argsort(np.abs(sv))[-8:][::-1]
-            factors_up, factors_down = [], []
-
+            xm=primary.steps[-1][1] if hasattr(primary,"steps") else primary
+            if hasattr(primary,"steps"):
+                from sklearn.pipeline import Pipeline as SKP
+                try: Xs=SKP(primary.steps[:-1]).transform(X)
+                except: Xs=X
+            else: Xs=X
+            sv=shap.TreeExplainer(xm).shap_values(Xs)[0]
+            top_idx=np.argsort(np.abs(sv))[-8:][::-1]
+            fu=[]; fd=[]
             for i in top_idx:
-                feat     = ALL_FEATURES[i]
-                shap_val = sv[i]
-                label, hint, _ = PLAIN_EXPLANATIONS.get(feat, (feat, "", True))
-                if shap_val > 0.05:
-                    factors_up.append((label, hint, abs(shap_val)))
-                elif shap_val < -0.05:
-                    factors_down.append((label, hint, abs(shap_val)))
-
-            if factors_up:
-                st.markdown("#### 🔴 Factors raising your risk")
-                for label, hint, magnitude in sorted(factors_up, key=lambda x: -x[2]):
-                    bar_w = min(int(magnitude * 300), 100)
-                    st.markdown(f"""<div style='background:white;border-left:4px solid #ef4444;
-                    border-radius:10px;padding:14px 18px;margin:6px 0;box-shadow:0 1px 8px #0001'>
-                    <div style='font-weight:700;font-size:0.95rem;color:#1e293b'>{label}</div>
-                    <div style='font-size:0.82rem;color:#64748b;margin:2px 0'>{hint}</div>
-                    <div style='background:#fee2e2;border-radius:999px;height:5px;margin-top:8px'>
-                      <div style='background:#ef4444;border-radius:999px;height:5px;
-                           width:{bar_w}%'></div></div></div>""",
-                    unsafe_allow_html=True)
-
-            if factors_down:
-                st.markdown("#### 🟢 Factors working in your favour")
-                for label, hint, magnitude in sorted(factors_down, key=lambda x: -x[2]):
-                    bar_w = min(int(magnitude * 300), 100)
-                    st.markdown(f"""<div style='background:white;border-left:4px solid #10b981;
-                    border-radius:10px;padding:14px 18px;margin:6px 0;box-shadow:0 1px 8px #0001'>
-                    <div style='font-weight:700;font-size:0.95rem;color:#1e293b'>{label}</div>
-                    <div style='font-size:0.82rem;color:#64748b;margin:2px 0'>{hint}</div>
-                    <div style='background:#d1fae5;border-radius:999px;height:5px;margin-top:8px'>
-                      <div style='background:#10b981;border-radius:999px;height:5px;
-                           width:{bar_w}%'></div></div></div>""",
-                    unsafe_allow_html=True)
-
+                feat=ALL_FEATURES[i]; sv_=sv[i]; label,hint=PLAIN.get(feat,(feat,""))
+                if sv_>0.05: fu.append((label,hint,abs(sv_)))
+                elif sv_<-0.05: fd.append((label,hint,abs(sv_)))
+            sh1,sh2=st.columns(2)
+            with sh1:
+                if fu:
+                    st.markdown("#### 🔴 Raising your risk")
+                    for label,hint,mag in sorted(fu,key=lambda x:-x[2]):
+                        bw=min(int(mag*280),100)
+                        st.markdown(f"""<div style='background:white;border-left:4px solid #ef4444;
+                        border-radius:12px;padding:14px 18px;margin:6px 0;box-shadow:0 2px 10px #ef444412'>
+                        <b style='color:#1a1a2e !important'>{label}</b><br>
+                        <span style='font-size:0.82rem;color:#64748b !important'>{hint}</span>
+                        <div style='background:#fee2e2;border-radius:999px;height:7px;margin-top:8px'>
+                        <div style='background:#ef4444;border-radius:999px;height:7px;width:{bw}%'></div></div></div>""",
+                        unsafe_allow_html=True)
+            with sh2:
+                if fd:
+                    st.markdown("#### 🟢 Working in your favour")
+                    for label,hint,mag in sorted(fd,key=lambda x:-x[2]):
+                        bw=min(int(mag*280),100)
+                        st.markdown(f"""<div style='background:white;border-left:4px solid #10b981;
+                        border-radius:12px;padding:14px 18px;margin:6px 0;box-shadow:0 2px 10px #10b98112'>
+                        <b style='color:#1a1a2e !important'>{label}</b><br>
+                        <span style='font-size:0.82rem;color:#64748b !important'>{hint}</span>
+                        <div style='background:#d1fae5;border-radius:999px;height:7px;margin-top:8px'>
+                        <div style='background:#10b981;border-radius:999px;height:7px;width:{bw}%'></div></div></div>""",
+                        unsafe_allow_html=True)
         except Exception as e:
-            st.info(f"Could not generate factor breakdown: {e}")
+            st.info(f"Factor breakdown: {e}")
 
-        # Prevention
+        # ── Prevention ──
         st.markdown("---")
         st.markdown("### 🛡️ What to do next")
-        for title, desc, cls in PREVENTION.get(risk["level"], PREVENTION["MODERATE"])[:5]:
-            st.markdown(f"""<div class="{cls}">
-            <div style='font-weight:700;font-size:0.95rem;margin-bottom:5px'>{title}</div>
-            <div style='font-size:0.87rem;color:#374151;line-height:1.6'>{desc}</div>
-            </div>""", unsafe_allow_html=True)
+        items=PREVENTION.get(risk["level"],PREVENTION["MODERATE"])[:6]
+        for i in range(0,len(items),2):
+            cols=st.columns(2)
+            for j,col in enumerate(cols):
+                if i+j<len(items):
+                    em,title,desc,cls=items[i+j]
+                    col.markdown(f'<div class="{cls}"><b style="color:#1a1a2e !important">{em} {title}</b><br><span style="font-size:0.88rem;color:#374151 !important">{desc}</span></div>',unsafe_allow_html=True)
 
         st.markdown("---")
-        c1, c2 = st.columns(2)
+        c1,c2=st.columns(2)
         with c1:
-            if st.button("← Redo Assessment"):
-                st.session_state.patient_step = 0
-                st.session_state.patient_data = {}
-                for k in ["words_shown", "word_phase", "digit_sequences", "digit_level",
-                          "digit_correct", "digit_done", "digit_phase", "mri_prob"]:
-                    st.session_state.pop(k, None)
+            if st.button("🔄 Start Over"):
+                st.session_state.patient_step=0; st.session_state.patient_data={}
+                st.session_state.faq_answers={}; st.session_state.gds_answers={}
+                for k in ["words_shown","word_phase","digit_sequences","digit_level",
+                          "digit_results","digit_done","digit_phase"]:
+                    st.session_state.pop(k,None)
                 st.rerun()
         with c2:
-            st.markdown("""<div style='background:#eff6ff;border:1px solid #bfdbfe;
-            border-radius:12px;padding:14px 18px;font-size:0.87rem;color:#1d4ed8'>
-            <b>💡 For higher accuracy:</b> Ask your doctor for clinical test scores
-            and enter them in <b>Doctor Mode</b>.
-            </div>""", unsafe_allow_html=True)
+            st.markdown("""<div style='background:#f0f4ff;border:2px solid #c7d2fe;
+            border-radius:14px;padding:16px 20px;font-size:0.9rem;color:#3730a3 !important'>
+            <b>💡 Higher accuracy:</b> Ask your doctor to enter clinical test scores in
+            <b>Doctor Mode</b> for a more precise result.</div>""",unsafe_allow_html=True)
